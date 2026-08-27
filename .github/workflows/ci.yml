@@ -153,12 +153,23 @@ jobs:
       # Distribution packagers run `cargo test` on the tarball as a matter of
       # course, so they would have found it first.
       - name: cargo package
-        run: cargo package
+        shell: bash
+        run: |
+          # A restored `target/` can still hold the previous version's package
+          # directory, and the cache action prunes files inside it, so an empty
+          # `zstandard-<old>/` shell outlives the run that produced it. Clear
+          # the directory instead of trusting whatever survived.
+          rm -rf target/package
+          cargo package
 
       - name: test the packaged crate
         shell: bash
         run: |
-          crate=$(ls -d target/package/zstandard-*/ | head -1)
+          # Address the directory by the manifest's own version. Globbing and
+          # taking the first match sorts 0.1.0 ahead of 0.1.1, so the step read
+          # a stale directory the moment the version moved.
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          crate="target/package/zstandard-$version"
           echo "testing $crate"
           cargo test --manifest-path "$crate/Cargo.toml"
           cargo test --manifest-path "$crate/Cargo.toml" --all-features
