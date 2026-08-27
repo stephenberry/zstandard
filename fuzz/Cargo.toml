@@ -1,0 +1,78 @@
+[package]
+name = "zstandard-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.zstandard]
+path = ".."
+features = ["internal-fuzz"]
+
+[[bin]]
+name = "frame_parse"
+path = "fuzz_targets/frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "literals_parse"
+path = "fuzz_targets/literals_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sequence_parse"
+path = "fuzz_targets/sequence_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "full_decode"
+path = "fuzz_targets/full_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "slice_decode"
+path = "fuzz_targets/slice_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streaming_decode"
+path = "fuzz_targets/streaming_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streaming_encode_roundtrip"
+path = "fuzz_targets/streaming_encode_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dictionary_encode_roundtrip"
+path = "fuzz_targets/dictionary_encode_roundtrip.rs"
+test = false
+doc = false
+bench = false

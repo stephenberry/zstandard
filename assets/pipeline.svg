@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="Encode pipeline: input bytes are split into blocks, each block is coded as literals with Huff0 and sequences with FSE, and the result is a standard .zst frame">
+  <title>zstandard encode pipeline</title>
+  <desc>Input bytes are split into blocks. Each block is coded as literals (Huff0) and sequences (FSE), which are assembled into a standard .zst frame. Decoding runs the same path in reverse.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+    </marker>
+    <style>
+      /* The palette follows the viewer's colour scheme, which GitHub honours
+         for an image-embedded SVG. Painting the page colour underneath it
+         bounds what happens when the viewer's scheme and the page's theme
+         disagree: matched, this rectangle is invisible against the README;
+         mismatched, the diagram reads as a deliberate card instead of as
+         near-invisible text. Keep markup characters out of this comment --
+         XML does not treat style content as CDATA, so a literal angle bracket
+         here is parsed as a tag and breaks the file. */
+      .page      { fill: #ffffff; }
+      .box       { fill: #4f46e5; fill-opacity: 0.09; stroke: #4f46e5; stroke-width: 1.5; }
+      .group     { fill: #0891b2; fill-opacity: 0.05; stroke: #0891b2; stroke-width: 1.5; stroke-dasharray: 6 5; }
+      .label     { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 600; fill: #24292f; text-anchor: middle; }
+      .sub       { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; fill: #57606a; text-anchor: middle; }
+      .grouptag  { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 1.6px; fill: #0891b2; text-anchor: middle; }
+      .flow      { fill: none; stroke: #8c959f; stroke-width: 1.8; }
+      .arrowhead { fill: #8c959f; }
+      @media (prefers-color-scheme: dark) {
+        .page     { fill: #0d1117; }
+        .box      { fill: #818cf8; fill-opacity: 0.14; stroke: #818cf8; }
+        .group    { fill: #22d3ee; fill-opacity: 0.06; stroke: #22d3ee; }
+        .label    { fill: #e6edf3; }
+        .sub      { fill: #9aa4b0; }
+        .grouptag { fill: #22d3ee; }
+        .flow     { stroke: #7d8590; }
+        .arrowhead{ fill: #7d8590; }
+      }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="300" rx="14" class="page"/>
+
+  <rect x="330" y="34" width="210" height="242" rx="16" class="group"/>
+  <text x="435" y="266" class="grouptag">ENTROPY CODING</text>
+
+  <path d="M130,158 H170" class="flow" marker-end="url(#arrow)"/>
+  <path d="M300,158 C325,158 325,98 344,98"   class="flow" marker-end="url(#arrow)"/>
+  <path d="M300,158 C325,158 325,218 344,218" class="flow" marker-end="url(#arrow)"/>
+  <path d="M520,98  C545,98  545,158 564,158" class="flow" marker-end="url(#arrow)"/>
+  <path d="M520,218 C545,218 545,158 564,158" class="flow" marker-end="url(#arrow)"/>
+
+  <rect x="10" y="130" width="120" height="56" rx="12" class="box"/>
+  <text x="70" y="154" class="label">input</text>
+  <text x="70" y="172" class="sub">&amp;[u8]</text>
+
+  <rect x="180" y="130" width="120" height="56" rx="12" class="box"/>
+  <text x="240" y="154" class="label">blocks</text>
+  <text x="240" y="172" class="sub">128 KiB max</text>
+
+  <rect x="350" y="70" width="170" height="56" rx="12" class="box"/>
+  <text x="435" y="94" class="label">literals</text>
+  <text x="435" y="112" class="sub">Huff0</text>
+
+  <rect x="350" y="190" width="170" height="56" rx="12" class="box"/>
+  <text x="435" y="214" class="label">sequences</text>
+  <text x="435" y="232" class="sub">FSE</text>
+
+  <rect x="570" y="130" width="180" height="56" rx="12" class="box"/>
+  <text x="660" y="154" class="label">.zst frame</text>
+  <text x="660" y="172" class="sub">bit-for-bit standard</text>
+</svg>

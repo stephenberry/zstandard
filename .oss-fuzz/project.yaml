@@ -1,0 +1,11 @@
+homepage: "https://github.com/stephenberry/zstandard"
+language: rust
+primary_contact: "stephenberry.developer@gmail.com"
+auto_ccs:
+  - "stephenberry.developer@gmail.com"
+sanitizers:
+  - address
+fuzzing_engines:
+  - libfuzzer
+main_repo: "https://github.com/stephenberry/zstandard.git"
+file_github_issue: false

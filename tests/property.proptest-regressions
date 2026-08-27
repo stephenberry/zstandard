@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d4eb5a00cfc16639261b05bc5cb7d0471b73acac4d808179b3f0f642afc294f1 # shrinks to shape = LargeInput { templates: 1, repeat_period: 131072, noise: 16589 }, level = 1

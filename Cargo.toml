@@ -1,0 +1,207 @@
+[package]
+name = "zstandard"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "Pure Rust Zstandard frame codec foundation"
+repository = "https://github.com/stephenberry/zstandard"
+homepage = "https://github.com/stephenberry/zstandard"
+documentation = "https://docs.rs/zstandard"
+readme = "README.md"
+keywords = ["zstd", "zstandard", "compression", "codec", "decompression"]
+categories = ["compression", "encoding"]
+exclude = [
+    "/.cargo",
+    "/.claude",
+    "/.github",
+    "/.oss-fuzz",
+    # Maintainer oracles: shell drivers and C harnesses that diff this crate's
+    # assembly, resolved parameters, and long-distance sequences against a
+    # pinned upstream checkout. Nothing in the library or its packaged tests
+    # reads them -- only comments name them -- and `/scripts` and `/docs` are
+    # already excluded on the same grounds. `upstream-zstd.ref` is *not*
+    # excluded and must not be: `src/support/upstream_zstd.rs` pulls it in with
+    # `include_str!`.
+    "/oracles",
+    "/docs",
+    "/benches",
+    "/dev",
+    "/fuzz",
+    "/scripts",
+    "/src/bin",
+    "/target",
+    "/upstream-zstd",
+    "/tests",
+    "BENCHMARKS*.md",
+    "*.rmeta",
+    ".DS_Store",
+    # Workspace tooling config with no meaning to a consumer of the crate.
+    "/.gitignore",
+    "/deny.toml",
+]
+
+# `src/support/` is not excluded and must not be: `src/encode.rs`'s tests
+# `include!` it, so leaving it out produces a crate whose library builds and
+# whose test suite does not compile. `cargo package` cannot catch that on its
+# own — it verifies a build, not a test build. `cargo test` inside
+# `target/package/zstandard-<version>/` is the check that can.
+
+# Warnings are errors here. A registry dependency is built with `--cap-lints
+# allow`, so this cannot break anyone who depends on zstandard; it binds this
+# workspace only. The cost it does carry is that a new rustc can introduce a
+# lint that fails the build for contributors — `cargo build --cap-lints warn`
+# is the escape hatch while the new lint is being addressed.
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# Silenced deliberately. Each of these fires on something this crate does on
+# purpose, and the reason is recorded here rather than at 100 call sites.
+
+# This is a port of C zstd, function by function, and the parameter lists come
+# with it. `ZSTD_compressBlock_lazy_generic` takes twelve; splitting it into
+# argument structs would make the Rust harder to diff against the C, and being
+# able to do that diff is what has found nearly every ratio defect in this
+# project's history.
+too_many_arguments = "allow"
+
+# `docs/SEMVER.md` states that `EncoderOptions` and `DecoderOptions` gain
+# fields in minor releases and must be constructed with `..Default::default()`.
+# This lint fires exactly when every current field happens to be named, which
+# is a property of today's field list rather than of the code — removing the
+# update syntax is what would break the next time a field is added.
+needless_update = "allow"
+
+# Ported loops index several parallel arrays from one cursor, or walk an index
+# space that is not the length of any one slice. Rewriting them as iterator
+# chains would obscure which upstream loop each corresponds to.
+needless_range_loop = "allow"
+
+# `ip + 1 <= limit` is upstream's bound arithmetic, kept verbatim. The
+# suggested `ip < limit` is equivalent, and rewriting bound expressions to save
+# a token is a poor trade in a codebase where the match floor, the traversal
+# bound and the window floor have each been off by one at some point.
+int_plus_one = "allow"
+
+# Fires on `if let Some(x) = ... { if cond(x) { ... } }`, where collapsing
+# needs a let-chain that merges the binding with the test that uses it. In
+# decoder and parser guards the nesting is the clearer form: it separates
+# "did we get one" from "is it acceptable".
+collapsible_if = "allow"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[features]
+default = []
+# Diagnostic encoder/decoder tracing and stage-profiling APIs. These are
+# maintainer tools — block traces, parser stats, stage timings — that are
+# unstable and not part of the supported public surface. Enable only for
+# benchmarking, debugging, or working on encoder competitiveness.
+internal-trace = []
+internal-fuzz = []
+asm-inspect = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+path = "src/lib.rs"
+
+# Maintainer profiling and trace tools that consume the gated internal-trace
+# APIs. Excluded from the published crate via the top-level `exclude` list,
+# and skipped by `cargo build` / `cargo test` unless the feature is enabled.
+[[bin]]
+name = "benchmark_report"
+path = "src/bin/benchmark_report.rs"
+required-features = ["internal-trace"]
+
+[[bin]]
+name = "profile_decode_stage"
+path = "src/bin/profile_decode_stage.rs"
+required-features = ["internal-trace"]
+
+[[bin]]
+name = "profile_encode_stage"
+path = "src/bin/profile_encode_stage.rs"
+required-features = ["internal-trace"]
+
+[[bin]]
+name = "trace_bad_blocks"
+path = "src/bin/trace_bad_blocks.rs"
+required-features = ["internal-trace"]
+
+# Declaring this one is not optional bookkeeping: a bin under `src/bin` is
+# auto-discovered and built by a plain `cargo build` or `cargo test`, so
+# omitting the entry does not leave it ungated, it leaves it gated by nothing
+# and failing to compile against the default feature set.
+[[bin]]
+name = "compare_ratio_rows"
+path = "src/bin/compare_ratio_rows.rs"
+required-features = ["internal-trace"]
+
+# These two are deliberately *not* gated on `internal-trace`, unlike the four
+# above: they drive the public API only, and `scripts/pgo_bench.sh` builds them
+# with a bare `cargo build --release` to collect profiles. Turning a feature on
+# for that build would gather the profile from a library compiled with tracing
+# hooks and apply it to one shipped without them. They are declared anyway,
+# because an undeclared bin under `src/bin` is not ungated by default, it is
+# built by every plain `cargo build` with no record here that it exists.
+[[bin]]
+name = "profile_encode"
+path = "src/bin/profile_encode.rs"
+
+[[bin]]
+name = "profile_decode"
+path = "src/bin/profile_decode.rs"
+
+[[bin]]
+name = "profile_streaming_decode"
+path = "src/bin/profile_streaming_decode.rs"
+
+# The upstream-parity integration suite uses the trace APIs to assert encoder
+# behavior matches the C reference at the parser level. Skipped on default
+# `cargo test`; runs on `cargo test --features internal-trace` (or
+# `--all-features`).
+[[test]]
+name = "upstream_interop"
+path = "tests/upstream_interop.rs"
+required-features = ["internal-trace"]
+
+# Reads `BlockTrace` to see which parser actually ran, which is the only way to
+# ask what a configuration reaches rather than what it produces.
+[[test]]
+name = "coverage"
+path = "tests/coverage.rs"
+required-features = ["internal-trace"]
+
+[[bench]]
+name = "interop"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+
+# The suite compresses megabytes of corpus, so its cost is almost entirely the
+# library running rather than the library compiling, and an unoptimized build
+# pays that on every byte. `tests/baseline.rs` alone measured 675.77s here at
+# opt-level 0 against 39.02s in release; at 2 it is 107.20s. CI runs the whole
+# suite twice per leg across seven legs, so this is the single largest lever on
+# what a push costs.
+#
+# `test` and not `dev`: a plain `cargo build` stays unoptimized and fast to
+# iterate on. Debug assertions are left on, which is the point of testing off
+# the release profile at all — the crate leans on `debug_assert!` for the bounds
+# its `unsafe` blocks assume, and those still fire here.
+#
+# Note for coverage: `cargo llvm-cov` uses this profile, and optimization merges
+# regions, so line-level numbers get coarser. Pin it back with
+# `CARGO_PROFILE_TEST_OPT_LEVEL=0` on that step if the precision matters.
+[profile.test]
+opt-level = 2

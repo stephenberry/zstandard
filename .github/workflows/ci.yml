@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Oldest supported and current, and deliberately not `beta`. A beta
+        # failure is the compiler changing rather than the pushed commit
+        # changing, so it re-litigated the toolchain on three of seven legs of
+        # every push — and `[lints.rust] warnings = "deny"` makes any new rustc
+        # lint a hard error, which is most of what it ever reported. The MSRV
+        # leg is the opposite case and stays: writing against an API stabilized
+        # after 1.96 is something a commit really can do.
+        #
+        # The cost is real and was accepted: an `extern "C"` `memcpy`
+        # declaration with a mismatched signature once broke every beta leg
+        # before the release carrying that check reached stable. A break of that
+        # shape now surfaces when the release lands instead of six weeks early.
+        rust: [stable]
+        include:
+          - os: ubuntu-latest
+            rust: "1.96"  # MSRV
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `upstream-zstd.ref` is the single source of truth for which upstream
+      # revision the parity tests are written against; the test harness reads
+      # the same file and refuses to compare against anything else.
+      - name: Read the pinned upstream zstd ref
+        id: upstream
+        shell: bash
+        run: echo "ref=$(tr -d '[:space:]' < upstream-zstd.ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream zstd (interop tests)
+        if: runner.os == 'Linux' && matrix.rust == 'stable'
+        uses: actions/checkout@v7
+        with:
+          repository: facebook/zstd
+          ref: ${{ steps.upstream.outputs.ref }}
+          # The harness verifies the revision with git, which a shallow
+          # checkout at a tag still answers correctly — no fetch-depth needed.
+          path: upstream-zstd
+
+      - name: Build upstream zstd
+        if: runner.os == 'Linux' && matrix.rust == 'stable'
+        shell: bash
+        run: make -j lib -C upstream-zstd
+
+      - name: cargo build
+        run: cargo build --verbose
+
+      # Only the leg that checked upstream out points at it and demands it;
+      # elsewhere both variables are empty, which the harness treats as unset,
+      # so the parity tests skip as they always have.
+      - name: cargo test
+        run: cargo test --verbose
+        env:
+          ZSTANDARD_UPSTREAM_DIR: ${{ (runner.os == 'Linux' && matrix.rust == 'stable') && format('{0}/upstream-zstd', github.workspace) || '' }}
+          ZSTANDARD_REQUIRE_UPSTREAM: ${{ (runner.os == 'Linux' && matrix.rust == 'stable') && '1' || '' }}
+
+      - name: cargo test (all features)
+        run: cargo test --all-features --verbose
+        env:
+          ZSTANDARD_UPSTREAM_DIR: ${{ (runner.os == 'Linux' && matrix.rust == 'stable') && format('{0}/upstream-zstd', github.workspace) || '' }}
+          ZSTANDARD_REQUIRE_UPSTREAM: ${{ (runner.os == 'Linux' && matrix.rust == 'stable') && '1' || '' }}
+
+  lint:
+    name: lint (fmt + clippy + docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      # No longer informational: the baseline is clean and `[lints]` in
+      # Cargo.toml denies warnings, so anything new fails here. Run it for both
+      # feature sets — the default one is not a subset, because `cfg(test)`
+      # without `internal-trace` compiles items no default-feature test uses.
+      - name: cargo clippy
+        run: cargo clippy --all-targets
+
+      - name: cargo clippy (all features)
+        run: cargo clippy --all-targets --all-features
+
+      - name: cargo doc
+        run: cargo doc --no-deps --all-features
+
+      # `#![deny(unsafe_code)]` cannot enforce this on its own: an inner
+      # `#[allow(unsafe_code)]` silences it, and the crate relies on exactly
+      # that to opt into unchecked indexing and wide copies on hot paths.
+      # Counting the escapes is what keeps them from spreading unnoticed.
+      # Raise the budget deliberately, in the same commit that adds the use.
+      - name: unsafe budget
+        run: |
+          # 147 since Huffman's double-symbol (X2) literal decoder added three.
+          # It was 146 after `decode_into_slice`: two in `decode_out.rs` for
+          # the destination's `set_len` and its memcpy append, one for the
+          # byte-exact sequence tail, and one for the
+          # sequence executor's split into checked and unchecked halves, less
+          # the `append_bytes_unchecked` the append replaced. It was 143 when
+          # the two dead dict-match-state prefix walks came out of `fast.rs`
+          # and `double_fast.rs`. Lower the budget whenever a deletion drops
+          # it, or the ratchet only ever loosens.
+          budget=147
+          actual=$(grep -r 'allow(unsafe_code)' src --include='*.rs' -o | wc -l | tr -d ' ')
+          echo "allow(unsafe_code) sites: $actual (budget $budget)"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::unsafe escapes grew from $budget to $actual."
+            echo "Each one needs a SAFETY comment and a reason. Raise the budget in ci.yml only alongside the justification."
+            grep -rn 'allow(unsafe_code)' src --include='*.rs' | sed 's/^/  /'
+            exit 1
+          fi
+
+  package:
+    name: package (the published tarball builds and tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `cargo package` alone is not this check. It verifies that the packaged
+      # crate *builds*, and a build does not compile `#[cfg(test)]` code, so a
+      # test module reaching outside the package boundary passes it. That is
+      # exactly what happened: `src/encode.rs` included two files from
+      # `benches/`, which `exclude` keeps out of the tarball, and the published
+      # crate's test suite could not compile for as long as the include existed.
+      # Distribution packagers run `cargo test` on the tarball as a matter of
+      # course, so they would have found it first.
+      - name: cargo package
+        run: cargo package
+
+      - name: test the packaged crate
+        shell: bash
+        run: |
+          crate=$(ls -d target/package/zstandard-*/ | head -1)
+          echo "testing $crate"
+          cargo test --manifest-path "$crate/Cargo.toml"
+          cargo test --manifest-path "$crate/Cargo.toml" --all-features
+        # The tarball has no `upstream-zstd/`, and it excludes `tests/`, so
+        # what runs here is the library's own unit tests and doctests. That is
+        # the population that has to compile from an unpacked crate.
+        env:
+          ZSTANDARD_UPSTREAM_DIR: ""
+          ZSTANDARD_REQUIRE_UPSTREAM: ""
+
+  wasm:
+    name: wasm32-unknown-unknown (lib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # Pure Rust with no build script is the reason to reach for this crate
+      # over a binding to the C library, and on wasm32 that difference is at
+      # its widest: the target ships no C sysroot, so a `cc`-driven dependency
+      # needs one arranged before it will compile, while this crate needs only
+      # the target installed. That property is worth nothing unless something
+      # checks it, and nothing did.
+      #
+      # `--lib`, not `--all-targets`, and not because of anything in this
+      # crate: `proptest` pulls `getrandom`, which refuses
+      # wasm32-unknown-unknown without a JS backend, so tests and examples
+      # cannot compile there regardless. The library is what consumers link.
+      - name: cargo check (lib)
+        run: cargo check --lib --target wasm32-unknown-unknown
+
+      - name: cargo check (lib, all features)
+        run: cargo check --lib --all-features --target wasm32-unknown-unknown
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A prebuilt binary rather than `cargo install cargo-audit --locked`,
+      # which compiled the tool from source on every run. `coverage.yml` already
+      # installs `cargo-llvm-cov` this way; this is the same trick.
+      - uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit
+        run: cargo audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # See the note on `cargo-audit` above.
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo deny check
+        run: cargo deny check

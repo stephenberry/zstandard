@@ -1,0 +1,17 @@
+/target
+*.rmeta
+.DS_Store
+profile.json.gz
+BENCHMARKS_local.md
+/tmp
+/upstream-zstd
+tmp/
+
+# Session handoff notes. Kept locally, deliberately untracked: the file is a
+# working instrument rather than documentation, it carries an absolute path
+# from whichever machine last wrote it, and its dated status lines go stale
+# faster than anyone refreshes them. Anything in it that a reader of this
+# repository needs belongs in `docs/` or a comment at the code it describes --
+# see "The repcode substitution" in `docs/PARITY_PLAN.md`, which was extracted
+# from it for exactly that reason.
+/dev/HANDOFF.md

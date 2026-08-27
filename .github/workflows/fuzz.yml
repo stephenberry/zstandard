@@ -1,0 +1,110 @@
+name: Fuzz
+
+on:
+  schedule:
+    # 06:00 UTC daily — short smoke run on each fuzz target.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Per-target fuzzing time in seconds"
+        required: false
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+  FUZZ_DURATION: ${{ github.event.inputs.duration_seconds || '300' }}
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: frame_parse
+            seeds: frames
+          - target: literals_parse
+            seeds: frames
+          - target: sequence_parse
+            seeds: frames
+          - target: full_decode
+            seeds: frames
+          - target: slice_decode
+            seeds: frames
+          - target: streaming_decode
+            seeds: chunked_frames
+          - target: encode_roundtrip
+            seeds: encode_roundtrip
+          - target: streaming_encode_roundtrip
+            seeds: streaming_encode_roundtrip
+          - target: dictionary_encode_roundtrip
+            seeds: dictionary_encode_roundtrip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+
+      # Without this every scheduled run starts from an empty corpus and
+      # re-explores the same shallow surface, which is how a target can pass for
+      # months while never reaching past a frame header. The key is unique per
+      # run so a cache is always written; `restore-keys` picks up the newest
+      # earlier one.
+      - name: Restore the accumulated corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Valid frames and structured bodies. A fuzzer will not assemble a legal
+      # frame header out of random bytes, let alone legal entropy tables, so
+      # without these the decode targets spend their run at the front door.
+      - name: Generate the seed corpus
+        run: cargo run --release --example fuzz_seeds
+
+      # `-timeout` is what makes a single slow input a failure rather than a
+      # slightly longer iteration. libFuzzer's default is 1200s, which is why the
+      # decoder could run `O(output * window)` without any target noticing. Every
+      # target is capped at a megabyte of output, so 25s is far more than any
+      # honest input needs and far less than a return to quadratic would take.
+      #
+      # The seed directory comes second, so libFuzzer reads from it but writes
+      # newly discovered inputs only into the cached corpus.
+      - name: Run ${{ matrix.target }} for ${{ env.FUZZ_DURATION }}s
+        run: |
+          # libFuzzer requires the directory it writes to exist; `cargo fuzz`
+          # only creates it when no corpus argument is given, and the cache
+          # restore leaves nothing behind on the first ever run.
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cargo fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} \
+            fuzz/seeds/${{ matrix.seeds }} \
+            -- -max_total_time=${FUZZ_DURATION} -timeout=25
+
+      # Keeps the cached corpus from growing without bound: inputs that add no
+      # coverage are dropped, so the next run spends its time on new ground
+      # rather than replaying a corpus that only ever gets longer.
+      - name: Minimize the corpus before caching it
+        if: success()
+        run: cargo fuzz cmin ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+
+      - name: Upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: |
+            fuzz/artifacts/${{ matrix.target }}
+            fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore

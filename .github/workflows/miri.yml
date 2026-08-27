@@ -1,0 +1,67 @@
+name: Miri
+
+# Miri interprets the crate and reports undefined behavior on inputs that
+# already work — a pointer computed out of bounds, a read of uninitialized
+# memory, a slice accessed past its provenance. None of that is visible to
+# `cargo test`, to clippy, or to a fuzzer, because on real hardware these
+# almost always produce the right answer right up until an inlining decision
+# changes. The first run of this against zstandard found six, five of them on the
+# decode path.
+#
+# It runs weekly rather than on every push. A full pass takes around twenty
+# minutes, which is too much to put in front of every change, and the defects it
+# finds are latent rather than the kind a normal CI run would catch anyway: all
+# six of the first batch had been in the tree for a long time, passing the whole
+# suite. This is a sweep for what has accumulated, not a gate on a change.
+#
+# Run it directly on anything that touches `unsafe` rather than waiting for
+# Sunday — `gh workflow run miri.yml`, or the Actions tab.
+
+on:
+  schedule:
+    # 04:00 UTC on Sundays, well clear of the daily fuzz run at 06:00.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Miri's own incremental cache went pathological during development here:
+  # a rebuild after editing `src/sequence.rs` sat at 100% CPU and 6.9 GB for
+  # over an hour, where a clean build of the same tree takes about a minute.
+  # Nothing is gained by incremental compilation in a job that starts cold.
+  CARGO_INCREMENTAL: 0
+  # The upstream parity harness shells out to `git`, `cc`, and a compiled
+  # helper. Miri cannot spawn processes, so those tests skip themselves;
+  # isolation is off because the harness reads environment variables to work
+  # out that it should.
+  MIRIFLAGS: -Zmiri-disable-isolation
+
+jobs:
+  miri:
+    name: miri (undefined behavior)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly with Miri
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+
+      # `tests/miri.rs` is the target sized for an interpreter: small bodies,
+      # small blocks, and `flush` to reach block boundaries the encoder would
+      # never choose on its own. The rest of the suite uses bodies of 128 KiB
+      # and up, which Miri needs many minutes apiece to walk — running it here
+      # would buy very little coverage for a great deal of wall clock.
+      #
+      # Around 20 minutes on a developer machine, most of it the two level
+      # sweeps. If that grows, shrink the bodies in `tests/miri.rs` before
+      # dropping levels: Miri's cost is superlinear in body size at btopt and
+      # btultra, while the levels are the coverage.
+      - name: cargo miri test
+        run: cargo miri test --test miri -- --test-threads=1

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/stephenberry/zstandard/security/advisories/new
+    about: |
+      Report decoder soundness issues, panics on adversarial input, OOB reads,
+      infinite loops, or unbounded memory growth privately. See SECURITY.md.
+  - name: Question or discussion
+    url: https://github.com/stephenberry/zstandard/discussions
+    about: For usage questions and open-ended design discussion, prefer
+      Discussions over an issue.

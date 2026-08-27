@@ -1,0 +1,62 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  llvm-cov:
+    name: cargo llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # `upstream-zstd.ref` is the single source of truth; the test harness
+      # reads the same file and refuses to compare against anything else.
+      - name: Read the pinned upstream zstd ref
+        id: upstream
+        shell: bash
+        run: echo "ref=$(tr -d '[:space:]' < upstream-zstd.ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream zstd (for interop tests)
+        uses: actions/checkout@v7
+        with:
+          repository: facebook/zstd
+          ref: ${{ steps.upstream.outputs.ref }}
+          # The harness verifies the revision with git, which a shallow
+          # checkout at a tag still answers correctly — no fetch-depth needed.
+          path: upstream-zstd
+
+      - name: Build upstream zstd
+        shell: bash
+        run: make -j lib -C upstream-zstd
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --all-features --lcov --output-path lcov.info \
+            --ignore-filename-regex '(src/bin/|benches/|tests/upstream_interop\.rs)'
+        env:
+          ZSTANDARD_UPSTREAM_DIR: ${{ github.workspace }}/upstream-zstd
+          ZSTANDARD_REQUIRE_UPSTREAM: "1"
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
