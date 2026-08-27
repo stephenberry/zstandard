@@ -35,7 +35,7 @@ Add the dependency:
 
 ```toml
 [dependencies]
-zstandard = { git = "https://github.com/stephenberry/zstandard" }
+zstandard = "0.1"
 ```
 
 Compress and decompress:
