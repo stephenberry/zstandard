@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-08-28
 
 ### Fixed
 
-- An overlapping match with an offset under 8 could decode to the wrong bytes past its first 32. A dedicated expander tiled the offset into a 32-byte buffer and stamped that buffer out every 32 bytes, which restarts the period out of phase for the offsets that do not divide 32 -- 3, 5, 6 and 7. It is reached two ways: any match in the final bytes of a `decode_into_slice` destination, and, through the dictionary boundary, any match that starts in a dictionary and runs on into the frame, which affects `decode_all_with_dict` and the streaming decoder as well. Found by the `slice_decode` fuzz target.
+- An overlapping match with an offset of 3, 5, 6 or 7 could decode to the wrong bytes past its first 32. A dedicated short-offset expander stamped a 32-byte pattern buffer out repeatedly, which restarts the period out of phase for the offsets that do not divide 32. Two routes reach it: any match in the final bytes of a `decode_into_slice` destination, and any match that starts in a dictionary and runs on into the frame, so `decode_all_with_dict` and the streaming decoder were affected as well. Found by the `slice_decode` fuzz target.
 
 ### Internal
 
@@ -99,5 +99,6 @@ Rust 1.96 (2024 edition), `std`. `wasm32-unknown-unknown` is checked in CI. Lice
 
 Development history from before this release is in [dev/PRERELEASE_LOG.md](dev/PRERELEASE_LOG.md). None of it is release history, since `0.1.0` is the first published version, but it records why much of the code is shaped the way it is.
 
+[0.1.2]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.2
 [0.1.1]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.1
 [0.1.0]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.0
