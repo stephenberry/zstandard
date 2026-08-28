@@ -220,6 +220,27 @@ assert_eq!(restored, payload);
 
 `Writer::finish()` ends the frame and hands back the inner writer. Dropping a `Writer` without calling it leaves the frame truncated, because `Drop` has nowhere to report an error.
 
+Setting only the level — the usual shape when migrating from `zstd`'s `Encoder::new(sink, level)` — goes through `EncoderOptions` like every other encoder knob. `i32` and `u8` convert into `CompressionLevel`, and `zstandard::Error` converts into `io::Error`, so a level read from configuration is validated inline:
+
+```rust
+use std::io::Write;
+use zstandard::{EncoderOptions, io::Writer};
+
+# fn compress_at(sink: Vec<u8>, level: i32) -> std::io::Result<Vec<u8>> {
+let mut writer = Writer::with_options(
+    sink,
+    EncoderOptions::default().with_compression_level(level.try_into()?),
+)?;
+writer.write_all(b"payload")?;
+writer.finish()
+# }
+# assert!(!compress_at(Vec::new(), 9)?.is_empty());
+# assert!(compress_at(Vec::new(), 99).is_err());
+# Ok::<(), std::io::Error>(())
+```
+
+An out-of-range level is reported here rather than clamped, which is the one behavioral difference from upstream. A level fixed at compile time is a `CompressionLevel` constant and skips the conversion: `EncoderOptions::default().with_compression_level(CompressionLevel::BETTER)`.
+
 ### Dictionaries
 
 Small, similar payloads compress far better with a shared dictionary. Both raw-content dictionaries and formatted Zstandard dictionaries work:

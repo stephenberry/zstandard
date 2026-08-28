@@ -23,6 +23,33 @@
 //! assert_eq!(restored, payload);
 //! # Ok::<(), std::io::Error>(())
 //! ```
+//!
+//! Setting only the compression level goes through [`EncoderOptions`], where
+//! every encoder knob lives. `i32` and `u8` both convert into a
+//! [`CompressionLevel`](crate::CompressionLevel), and [`Error`] converts into
+//! an [`io::Error`], so a level taken from configuration is validated inline
+//! rather than in a separate step:
+//!
+//! ```
+//! use std::io::Write;
+//! use zstandard::{EncoderOptions, io::Writer};
+//!
+//! # fn compress_at(sink: Vec<u8>, level: i32) -> std::io::Result<Vec<u8>> {
+//! let mut writer = Writer::with_options(
+//!     sink,
+//!     EncoderOptions::default().with_compression_level(level.try_into()?),
+//! )?;
+//! writer.write_all(b"payload")?;
+//! writer.finish()
+//! # }
+//! # assert!(!compress_at(Vec::new(), 9)?.is_empty());
+//! # assert!(compress_at(Vec::new(), 99).is_err());
+//! # Ok::<(), std::io::Error>(())
+//! ```
+//!
+//! A level fixed at compile time is one of the `CompressionLevel` constants and
+//! needs no conversion:
+//! `EncoderOptions::default().with_compression_level(CompressionLevel::BETTER)`.
 
 use std::io::{self, Read, Write};
 
