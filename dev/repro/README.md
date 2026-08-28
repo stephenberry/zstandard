@@ -1,8 +1,8 @@
 # Reproducers
 
-Inputs that trigger a known open defect, kept so the defect can be re-triggered
-without rediscovering it. Each is a fuzz target input: the first bytes are the
-control prefix the target splits off, the rest is the body seed.
+Inputs kept so a finding can be re-triggered without rediscovering it. Each is a
+fuzz target input: the first bytes are the control prefix the target splits off,
+the rest is the body seed.
 
 ## `btlazy2-quadratic-fuzzer-found.bin`
 
@@ -15,7 +15,31 @@ cargo +nightly fuzz run encode_roundtrip dev/repro/btlazy2-quadratic-fuzzer-foun
 ```
 
 It decodes to level 15, `block_size: 1031`, amplification on, over a body of
-`tile_with_drift(&[0x9f, 0xb1, 0x9f], n)`. Encoding cost grows as roughly
-`n^2.3` once `n` passes 256 KiB, so at the shipped caps the target never reaches
-the size where it bites. What causes the growth is not established beyond that
-curve.
+`tile_with_drift(&[0x9f, 0xb1, 0x9f], n)`: a three-byte seed tiled with one byte
+perturbed per tile. Encoding cost grows superlinearly once `n` passes 256 KiB,
+so at the shipped caps the target never reaches the size where it bites.
+
+**This is not a defect of this crate.** Upstream `v1.5.7` costs the same time on
+the same bytes, both sides driven through the same block boundaries -- ours by
+`EncoderOptions::block_size`, C's by a `ZSTD_compressStream2` flush every `bs`
+bytes, since nothing else makes the C encoder cut where we cut. Ours against
+upstream: 215 ms against 246 ms at 512 KiB, 1076 against 1224 at 1 MiB, 2987
+against 3402 at 2 MiB. Within 15% at every size and faster at the top.
+
+The time is the DUBT match finder of `zstd_lazy.c` (`ZSTD_updateDUBT` and
+`ZSTD_DUBT_findBestMatch`, not the `zstd_opt.c` tree), which levels 13 to 15
+select; 99.6% of samples sit in `<BinaryTreeFinder as LazySearchFinder>::find_match`.
+The knee is the cparams tier boundary at 256 KiB (`upstream_cparams_tier`,
+`src/encode.rs:661`), which is inclusive: 256 KiB exactly takes 1.8 ms and one
+byte more takes 34.7 ms, because that byte moves level 15 off the reduced tier
+and onto `windowLog 22, chainLog 23, searchLog 6`. Cost tracks block size
+against the data's period rather than size alone -- at 512 KiB, `block_size`
+1024 takes 2.2 ms and 1031 takes 222 ms.
+
+Kept for two reasons. It sets the fuzz budget: `body_cap_for` stops at 320 KiB
+for levels 5 and up, which is 61 ms per body here against 2 s at 1.5 MiB. And
+the shape is alarming enough to be rediscovered, so it is worth being able to
+re-price it rather than hunt for a bug that is not there. Price anything against
+upstream before reading it as a defect, and never compare a fuzz-build timing
+with anything else: the fuzz build is about 29x release cost here, and a debug
+build 78x.
