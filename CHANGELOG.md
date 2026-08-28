@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- An overlapping match with an offset under 8 could decode to the wrong bytes past its first 32. A dedicated expander tiled the offset into a 32-byte buffer and stamped that buffer out every 32 bytes, which restarts the period out of phase for the offsets that do not divide 32 -- 3, 5, 6 and 7. It is reached two ways: any match in the final bytes of a `decode_into_slice` destination, and, through the dictionary boundary, any match that starts in a dictionary and runs on into the frame, which affects `decode_all_with_dict` and the streaming decoder as well. Found by the `slice_decode` fuzz target.
+
+### Internal
+
+- A `dictionary_decode` fuzz target feeds arbitrary bytes to the dictionary decode paths, which nothing did before, and `dictionary_encode_roundtrip` gains seeds pairing a dictionary that ends in a short period with a body that opens on the same one. That pairing is what reaches the dictionary boundary; without it the defect above survived five days of fuzzing.
+
 ## [0.1.1] - 2026-08-27
 
 Documentation only. The library is unchanged from 0.1.0.

@@ -3061,35 +3061,25 @@ fn append_match_from_history(
         return Ok(());
     }
 
-    // Small overlapping offset (2..7): build a 32-byte pattern buffer on the
-    // stack via doubling, then blast it out with wildcopy.
-    if offset < 8 {
-        let mut pattern = [0u8; 32];
-        pattern[..offset].copy_from_slice(&out.as_slice()[match_start..match_start + offset]);
-        let mut filled = offset;
-        while filled < 32 {
-            let chunk = filled.min(32 - filled);
-            pattern.copy_within(0..chunk, filled);
-            filled += chunk;
-        }
-        unsafe {
-            let dst = out.as_mut_ptr().add(out_len);
-            let mut remaining = match_length;
-            let mut pos = 0;
-            while remaining >= 32 {
-                core::ptr::copy_nonoverlapping(pattern.as_ptr(), dst.add(pos), 32);
-                pos += 32;
-                remaining -= 32;
-            }
-            if remaining > 0 {
-                core::ptr::copy_nonoverlapping(pattern.as_ptr(), dst.add(pos), remaining);
-            }
-            out.set_len(out_len + match_length);
-        }
-        return Ok(());
-    }
-
-    // General overlapping case (offset >= 8): pointer-based doubling.
+    // Every other overlapping offset: seed the destination with the offset's
+    // bytes and double what is there until the match is filled.
+    //
+    // A short offset used to get its own expander, which tiled the offset into
+    // a 32-byte buffer and stamped that buffer across the destination every 32
+    // bytes. The buffer repeats with period `offset`, so it may only be stamped
+    // where the period lines up; advancing 32 restarted it out of phase for
+    // every offset that does not divide 32 -- 3, 5, 6 and 7 -- corrupting the
+    // match past its first 32 bytes. Doubling has no such precondition: each
+    // round copies from a distance of `copied`, a multiple of `offset` on every
+    // round but the last, and the last is truncated to what remains.
+    //
+    // Doubling is the slower of the two for matches below a few hundred bytes
+    // -- tens of nanoseconds per call, since it issues several small copies
+    // where the stamp issued one wide one -- and the faster above a few
+    // kilobytes. Neither matters: this is reached only for the last sequences
+    // of a fixed-destination decode and for matches crossing a dictionary
+    // boundary, a handful of calls per frame. The hot path is
+    // `copy_match_inline`, which is untouched.
     unsafe {
         let base = out.as_mut_ptr();
         let dst = base.add(out_len);

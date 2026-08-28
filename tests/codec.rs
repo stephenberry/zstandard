@@ -6443,6 +6443,118 @@ fn decode_into_slice_needs_no_headroom_at_any_tail_alignment() {
 }
 
 #[test]
+fn decode_into_slice_repeats_a_short_offset_match_in_phase() {
+    // An overlapping match is expanded by `append_match_from_history`, which a
+    // short offset once routed to a separate expander: it tiled the offset into
+    // a 32-byte buffer and stamped that buffer out every 32 bytes, which
+    // restarts the period out of phase for every offset that does not divide 32
+    // -- 3, 5, 6 and 7 -- silently corrupting the match past its first 32 bytes.
+    // The periods that do divide 32 are the control.
+    //
+    // This reaches that expander the way an ordinary caller does: only a fixed
+    // destination runs a prefix match through it, since a growable one has the
+    // wildcopy slack the hot executor needs. See
+    // `decode_with_dict_repeats_a_match_across_the_dictionary_boundary_in_phase`
+    // for the other route in, which a growable destination does reach.
+    for period in 2..=7usize {
+        let unit: Vec<u8> = (0..period).map(|index| b'a' + index as u8).collect();
+        for size in [40usize, 64, 65, 96, 200, 1000, 5000] {
+            let input: Vec<u8> = unit.iter().copied().cycle().take(size).collect();
+            let compressed = encode_all(&input).unwrap();
+            let (result, filled) =
+                decode_into_guarded_slice(&compressed, size, DecoderOptions::default());
+            assert_eq!(
+                result,
+                Ok(size),
+                "period {period} at {size} bytes: an exactly-sized destination was refused"
+            );
+            assert_eq!(filled, input, "period {period} at {size} bytes");
+        }
+    }
+}
+
+/// Pack a sequence bitstream: bits in the order the decoder reads them, the
+/// first landing at the top of the last byte and running down into earlier
+/// ones. The decoder requires the stream to be consumed exactly, so the caller
+/// has to hand over a whole number of bytes.
+fn pack_sequence_bitstream(bits: &[u8]) -> Vec<u8> {
+    assert_eq!(
+        bits.len() % 8,
+        0,
+        "the bitstream must end on a byte boundary"
+    );
+    let mut out = vec![0u8; bits.len() / 8];
+    let last = out.len() - 1;
+    for (index, &bit) in bits.iter().enumerate() {
+        out[last - index / 8] |= bit << (7 - index % 8);
+    }
+    out
+}
+
+#[test]
+fn decode_with_dict_repeats_a_match_across_the_dictionary_boundary_in_phase() {
+    // The other way into the short-offset expander, and the one a growable
+    // destination reaches: a match that starts inside the dictionary and runs
+    // on past the frame's first byte is split, and the part continuing into the
+    // frame is appended from history at an offset of everything produced so far
+    // -- under 8 whenever the match begins near the frame start. So
+    // `decode_all_with_dict` could return corrupted bytes, not just the
+    // fixed-destination entry points.
+    //
+    // No encoder here emits this shape, and no fuzz target decodes with a
+    // dictionary at all, so the frame is built by hand: zero literals and one
+    // sequence reaching `period` bytes back into the dictionary tail.
+    for period in 2..=7u32 {
+        let unit: Vec<u8> = (0..period).map(|index| b'a' + index as u8).collect();
+        let mut dictionary = vec![0u8; 4000];
+        dictionary.extend_from_slice(&unit);
+
+        // `offset_value` is the stored offset, three above the real one. Its
+        // code is the position of its high bit, and the remainder is sent as
+        // that many extra bits.
+        let offset_value = period + 3;
+        let offset_code = 31 - offset_value.leading_zeros();
+        let offset_extra = offset_value - (1 << offset_code);
+
+        // The match-length code is chosen so its extra bits, the offset's, and
+        // the one padding bit fill exactly one byte. Both codes below carry a
+        // match far longer than the 32 bytes the old expander got right.
+        let (match_code, match_baseline, match_bits) = match offset_code {
+            2 => (42u8, 99u32, 5u32),
+            _ => (41, 83, 4),
+        };
+        let match_length = match_baseline + ((1 << match_bits) - 1);
+
+        let mut bits = vec![1u8];
+        for shift in (0..offset_code).rev() {
+            bits.push(((offset_extra >> shift) & 1) as u8);
+        }
+        for shift in (0..match_bits).rev() {
+            bits.push((((match_length - match_baseline) >> shift) & 1) as u8);
+        }
+
+        // Literal-length, offset and match-length tables all in RLE mode, so
+        // each is one symbol byte and the bitstream carries only extra bits.
+        let mut payload = raw_literals_section(b"");
+        payload.extend_from_slice(&[1, 0b0101_0100, 0, offset_code as u8, match_code]);
+        payload.extend_from_slice(&pack_sequence_bitstream(&bits));
+
+        let mut frame = write_single_segment_header(match_length as usize);
+        append_compressed_block(&mut frame, &payload, true);
+
+        let expected: Vec<u8> = unit
+            .iter()
+            .copied()
+            .cycle()
+            .take(match_length as usize)
+            .collect();
+        let decoded = decode_all_with_dict(&frame, &dictionary)
+            .unwrap_or_else(|error| panic!("period {period}: {error:?}"));
+        assert_eq!(decoded, expected, "period {period}");
+    }
+}
+
+#[test]
 fn decode_into_slice_reports_too_small_rather_than_truncating() {
     let input = build_short_matches(300_000);
     let compressed = encode_all(&input).unwrap();
