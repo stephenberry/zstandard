@@ -2,8 +2,8 @@ use crate::{
     BLOCK_SIZE_MAX,
     block::parse_block_header,
     decode::{
-        DecoderOptions, decode_all_with_options, decode_all_with_prepared_dict_and_options,
-        decode_into_slice_with_options,
+        Decoder, DecoderOptions, decode_all_with_dict_and_options, decode_all_with_options,
+        decode_all_with_prepared_dict_and_options, decode_into_slice_with_options,
     },
     dictionary::{DecoderDictionary, EncoderDictionary},
     encode::{
@@ -209,6 +209,127 @@ pub fn streaming_decode(data: &[u8]) {
 /// reach its bound either way, and a cap past the tier boundary is all the
 /// coverage there is to buy. Bodies cost time roughly linearly, so the levels
 /// that stop at the boundary are the reason the targets run at all.
+/// Arbitrary bytes decoded against a dictionary, which nothing else here does.
+///
+/// `dictionary_encode_roundtrip` decodes with a dictionary too, but only frames
+/// this crate's own encoder produced, so the decoder never sees a hostile one.
+/// The gap that leaves is real: a match may reach back past the start of the
+/// frame into the dictionary, and the split that serves it -- part copied from
+/// the dictionary, the rest expanded from the frame's own output -- is reached
+/// through `execute_dictionary_match` and nowhere else. A defect found there in
+/// 2026-08 corrupted `decode_all_with_dict` for arbitrary callers, and no target
+/// could have reached the frame that showed it.
+///
+/// The first two bytes are the dictionary length, little-endian, clamped to what
+/// follows; the dictionary is those bytes and the frame is the rest. A length
+/// rather than a proportion so a seed's split survives its own bytes being
+/// mutated.
+///
+/// What this can and cannot see is worth stating. The one-shot, slice, and
+/// streaming decodes below share one sequence executor, so a defect that
+/// corrupts all three identically -- as that one did -- passes every assertion
+/// here; catching that needs an oracle outside this crate, which is what the
+/// round-trip targets and `tests/upstream_interop.rs` are for. What this does
+/// catch is everything asymmetric: memory errors and panics on the dictionary
+/// paths under a sanitizer, a fixed destination that refuses the size the
+/// growable decode just produced, a write past the end of one, and the three
+/// entry points disagreeing with each other.
+pub fn dictionary_decode(data: &[u8]) {
+    const GUARD: usize = 64;
+    const GUARD_BYTE: u8 = 0x5A;
+
+    let Some((control, rest)) = split_control::<2>(data) else {
+        return;
+    };
+    let split = usize::from(u16::from_le_bytes(control)).min(rest.len());
+    let (dictionary, frame) = rest.split_at(split);
+
+    let permissive = DecoderOptions {
+        max_window_size: Some(MAX_FUZZ_WINDOW_SIZE),
+        max_output_size: Some(MAX_FUZZ_OUTPUT_SIZE),
+        verify_checksum: false,
+        ..Default::default()
+    };
+
+    // Bytes opening with the dictionary magic but malformed after it are
+    // rejected here, which is correct rather than a defect; anything else is a
+    // raw content dictionary, which is the form that reaches the boundary split.
+    let Ok(prepared) = DecoderDictionary::new(dictionary) else {
+        return;
+    };
+    let Ok(expected) = decode_all_with_prepared_dict_and_options(frame, &prepared, permissive)
+    else {
+        return;
+    };
+
+    // The unprepared entry point parses the same bytes on every call rather than
+    // once, so it is a separate path to the same answer.
+    assert_eq!(
+        decode_all_with_dict_and_options(frame, dictionary, permissive).as_deref(),
+        Ok(expected.as_slice()),
+        "decoding with a dictionary disagreed with decoding with the same dictionary prepared"
+    );
+
+    // A destination sized by the growable decode has to be exactly enough, one
+    // byte less has to be refused, and neither may touch what follows the end.
+    let mut backing = vec![GUARD_BYTE; expected.len() + GUARD];
+    let (dst, guard) = backing.split_at_mut(expected.len());
+    let mut decoder = Decoder::new();
+    let written = decoder
+        .decode_into_slice_with_prepared_dict_and_options(frame, dst, &prepared, permissive)
+        .expect("a destination sized by the growable decode has to be enough");
+    assert_eq!(
+        written,
+        expected.len(),
+        "slice decode reported a short write"
+    );
+    assert_eq!(
+        dst,
+        expected.as_slice(),
+        "slice decode diverged from decode_all"
+    );
+    assert!(
+        guard.iter().all(|&byte| byte == GUARD_BYTE),
+        "slice decode wrote past the end of an exactly-sized destination"
+    );
+
+    if let Some(short) = expected.len().checked_sub(1) {
+        let mut backing = vec![GUARD_BYTE; short + GUARD];
+        let (dst, guard) = backing.split_at_mut(short);
+        let result = decoder
+            .decode_into_slice_with_prepared_dict_and_options(frame, dst, &prepared, permissive);
+        assert!(
+            matches!(result, Err(Error::DstSizeTooSmall)),
+            "a destination one byte short reported {result:?} instead of refusing"
+        );
+        assert!(
+            guard.iter().all(|&byte| byte == GUARD_BYTE),
+            "a refused slice decode wrote past the end of the destination"
+        );
+    }
+
+    // Fed in fragments the streaming decoder compacts its history as the caller
+    // drains, which moves the frame's own output under the dictionary offsets
+    // rather than leaving it at a fixed base.
+    let mut streaming = StreamingDecoder::with_prepared_dict(&prepared, permissive);
+    let mut streamed = Vec::new();
+    let chunk = 1 + usize::from(control[0] % 64);
+    for piece in frame.chunks(chunk) {
+        if streaming.push(piece).is_err() {
+            return;
+        }
+        streamed.extend_from_slice(&streaming.take_output());
+    }
+    if streaming.finish().is_err() {
+        return;
+    }
+    streamed.extend_from_slice(&streaming.take_output());
+    assert_eq!(
+        streamed, expected,
+        "the streaming decoder disagreed with the one-shot decode on the same dictionary"
+    );
+}
+
 fn body_cap_for(level: CompressionLevel) -> usize {
     match level.as_i32() {
         // Negative levels, fast and double-fast. Three windows' worth, which is

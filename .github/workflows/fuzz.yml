@@ -35,6 +35,8 @@ jobs:
             seeds: frames
           - target: streaming_decode
             seeds: chunked_frames
+          - target: dictionary_decode
+            seeds: dictionary_frames
           - target: encode_roundtrip
             seeds: encode_roundtrip
           - target: streaming_encode_roundtrip

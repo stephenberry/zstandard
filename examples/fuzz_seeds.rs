@@ -91,6 +91,15 @@ fn bodies() -> Vec<(&'static str, Vec<u8>)> {
     }
     out.push(("dense", dense));
 
+    // An unbroken five-byte period: one long match at an offset under 8, which
+    // the sequence executor expands from a tiled stack buffer rather than by
+    // copying history. Nothing else here reaches that expander with a match
+    // long enough to stamp the buffer more than once -- `zeros` is offset 1,
+    // `short` is too short, and `dense` breaks its period before any match
+    // runs. Five neither divides the buffer nor the vector width, so a stamp
+    // that loses the period's phase shows up in the output.
+    out.push(("period5", b"abcde".repeat(120)));
+
     out
 }
 
@@ -197,6 +206,45 @@ fn main() {
         }
     }
 
+    // Seeds for `dictionary_encode_roundtrip` that reach the dictionary
+    // boundary, which none of the bodies above does.
+    //
+    // The target splits its input into a dictionary and a body. A match that
+    // starts inside the dictionary and runs on into the frame takes a split
+    // path -- part copied from the dictionary, the rest expanded from the
+    // frame's own output at an offset of everything produced so far -- and
+    // reaching it needs the body to open on a match a few bytes back into the
+    // dictionary's tail. So the dictionary ends in a short period and the body
+    // opens with that same period. A 2026-08 defect in that expander survived
+    // five days of fuzzing because nothing set up that pairing; it fails this
+    // target's round trip immediately once something does.
+    //
+    // The split byte is 128 and the two halves are equal, so the dictionary
+    // ends exactly where the period begins.
+    {
+        let dir = root.join("dictionary_encode_roundtrip");
+        for period in 2..=7usize {
+            let unit: Vec<u8> = (0..period).map(|index| b'a' + index as u8).collect();
+            let half = 300;
+
+            let mut dictionary: Vec<u8> = (0..half as u32).map(|i| (i * 37 % 251) as u8).collect();
+            dictionary.truncate(half - period);
+            dictionary.extend_from_slice(&unit);
+
+            let body: Vec<u8> = unit.iter().copied().cycle().take(half).collect();
+
+            for level in [3u8, 6, 12] {
+                // Level, default block size, checksum on with the body taken as
+                // a seed rather than tiled, no parameter overrides, and a
+                // half-and-half dictionary split.
+                let mut seed = vec![level, 0, 1, 0, 0, 0, 0, 128];
+                seed.extend_from_slice(&dictionary);
+                seed.extend_from_slice(&body);
+                write(&dir, &format!("boundary-p{period}-l{level}"), &seed);
+            }
+        }
+    }
+
     // Frames for the decode targets. One directory shared by all four that read
     // a whole frame, since libFuzzer accepts any number of corpus directories.
     let dictionary: Vec<u8> = (0..512u32).map(|i| (i * 37 % 251) as u8).collect();
@@ -228,6 +276,22 @@ fn main() {
     let dir = root.join("frames");
     for (name, frame) in &frames {
         write(&dir, name, frame);
+    }
+
+    // The dictionary decode target reads a two-byte dictionary length, then
+    // takes the dictionary and the frame from what follows. Only the frames
+    // encoded against that dictionary are worth seeding: a frame with no
+    // dictionary-reaching match leaves the boundary split unexercised, which is
+    // the whole point of the target.
+    let dir = root.join("dictionary_frames");
+    for (name, frame) in &frames {
+        if !name.ends_with("-dict") {
+            continue;
+        }
+        let mut seed = (dictionary.len() as u16).to_le_bytes().to_vec();
+        seed.extend_from_slice(&dictionary);
+        seed.extend_from_slice(frame);
+        write(&dir, name, &seed);
     }
 
     // The streaming decode target reads a chunk-size selector first.

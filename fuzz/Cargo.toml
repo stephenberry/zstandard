@@ -71,6 +71,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dictionary_decode"
+path = "fuzz_targets/dictionary_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dictionary_encode_roundtrip"
 path = "fuzz_targets/dictionary_encode_roundtrip.rs"
 test = false
