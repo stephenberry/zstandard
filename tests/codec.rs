@@ -1,9 +1,9 @@
 use zstandard::{
     BlockType, CompressionLevel, Decoder, DecoderDictionary, DecoderOptions, Encoder,
     EncoderDictionary, EncoderOptions, Error, Format, FrameHeader, LdmMode, ParameterBounds,
-    ParameterOverrides, Strategy, StreamingDecoder, StreamingEncoder, decode_all,
-    decode_all_with_dict, decode_all_with_options, decode_all_with_prepared_dict, encode_all,
-    encode_all_with_dict, encode_all_with_dict_and_options, encode_all_with_options,
+    ParameterOverrides, RowMatchFinderMode, Strategy, StreamingDecoder, StreamingEncoder,
+    decode_all, decode_all_with_dict, decode_all_with_options, decode_all_with_prepared_dict,
+    encode_all, encode_all_with_dict, encode_all_with_dict_and_options, encode_all_with_options,
     encode_all_with_prepared_dict, encode_all_with_prepared_dict_and_options, parse_block_header,
     parse_frame_header, parse_frame_header_with_format, write_skippable_frame,
 };
@@ -4228,14 +4228,50 @@ fn build_record_text_pattern(size: usize) -> Vec<u8> {
     out
 }
 
+/// Records with a *random* field, and pseudorandom bytes.
+///
+/// A third and fourth shape, because the stale-row case below is as sensitive
+/// to the byte distribution as the out-of-bounds one above: it needs a row the
+/// previous frame filed under a tag the current frame also produces, holding a
+/// position whose bytes do not match. `build_pattern`'s ramp and
+/// `build_record_text_pattern`'s drifting field are both too regular to leave
+/// one -- every helper pairing of those two encodes identically whether the
+/// tables were cleared or not.
+fn build_random_field_records(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size + 32);
+    let mut x: u32 = 0xABCD_1234;
+    while out.len() < size {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.extend_from_slice(format!("rec {:07} f={}\n", out.len(), x % 1000).as_bytes());
+    }
+    out.truncate(size);
+    out
+}
+
+fn build_incompressible_bytes(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size + 4);
+    let mut x: u32 = 0xABCD_1234 ^ 7u32.wrapping_mul(0x9E37_79B9);
+    while out.len() < size {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.truncate(size);
+    out
+}
+
 #[test]
 fn reusing_an_encoder_across_a_long_then_short_frame_stays_in_bounds() {
-    // `Encoder` exists to be reused, and its row match finder deliberately
-    // keeps its position table across frames, relying on a rotated hash salt to
-    // invalidate the old tags. Tag collisions get through that, and the entry
-    // they carry is a position in the *previous* frame — which, after a long
-    // frame, can be far past the end of the current source. Both the candidate
-    // prefetch and the match-length count take that index unchecked.
+    // `Encoder` exists to be reused, and its row match finder used to keep its
+    // position table across frames, relying on a rotated hash salt to
+    // invalidate the old tags. Tag collisions got through that, and the entry
+    // they carried was a position in the *previous* frame -- which, after a
+    // long frame, can be far past the end of the current source. Both the
+    // candidate prefetch and the match-length count take that index unchecked.
+    //
+    // `RowHashFinder::reset` now clears that table, so this no longer has a
+    // stale entry to find. It is kept because the bound it established in
+    // `row_collect_match_indices_*` is what makes an unchecked index safe, and
+    // because nothing else here reuses an `Encoder` across two sizes.
     //
     // Encoding a long frame and then a strict prefix of it is the shape that
     // reproduces it: identical bytes hash to identical buckets, so the entries
@@ -4273,6 +4309,309 @@ fn reusing_an_encoder_across_a_long_then_short_frame_stays_in_bounds() {
             assert_eq!(decode_all(&reused).unwrap(), short);
         }
     }
+}
+
+/// Changing a parameter between two encodes on one `Encoder` gives the frame a
+/// fresh encoder would, for every finder.
+///
+/// The finders keep clamped copies of `min_match`, `chain_log` and
+/// `search_log`, and none of their `reset` methods restores one. Reuse was
+/// gated on a hand-listed subset of the parameters -- table geometry, mostly
+/// `hash_bits` -- so four of the five took a state built for one set and
+/// parsed the next frame under another. Only `Fast` checked `min_match`. The
+/// frames still round-tripped, which is why nothing caught it: they were valid
+/// frames, just not the ones the parameters asked for, and each came out at
+/// exactly the size the *previous* parameters produce.
+///
+/// Every row is chosen to be live rather than merely plausible: each pair
+/// produces two different frames from a *fresh* encoder, which is what makes
+/// the reused encode able to get it wrong. A pair that compresses to the same
+/// bytes either way proves nothing, and several obvious ones do -- on this
+/// data a hash chain gives the same frame at `min_match` 4 and 7, and 2^16
+/// against 2^20 of `chain_log` is no difference at all when 32 KiB of source
+/// fits in both.
+#[test]
+fn switching_parameters_on_a_reused_encoder_matches_a_fresh_one() {
+    let data = build_record_text_pattern(32 * 1024);
+
+    let with = |strategy: Strategy,
+                row: RowMatchFinderMode,
+                min_match: Option<u32>,
+                chain_log: Option<u32>,
+                search_log: Option<u32>| EncoderOptions {
+        compression_level: CompressionLevel::try_new(7).unwrap(),
+        parameters: ParameterOverrides {
+            strategy: Some(strategy),
+            use_row_match_finder: row,
+            min_match,
+            chain_log,
+            search_log,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // `Disabled` where the strategy would otherwise be diverted to the row
+    // finder, so that the row named in the label is the finder under test.
+    let off = RowMatchFinderMode::Disabled;
+    let on = RowMatchFinderMode::Enabled;
+
+    // Every variant `ContiguousBlockMatchState` can build, against the
+    // parameter each one stores a clamped copy of.
+    for (label, first, second) in [
+        (
+            "fast, min_match",
+            with(Strategy::Fast, off, Some(4), None, None),
+            with(Strategy::Fast, off, Some(6), None, None),
+        ),
+        (
+            "double-fast, min_match",
+            with(Strategy::DoubleFast, off, Some(4), None, None),
+            with(Strategy::DoubleFast, off, Some(6), None, None),
+        ),
+        (
+            "hash chain, chain_log",
+            with(Strategy::Greedy, off, None, Some(10), None),
+            with(Strategy::Greedy, off, None, Some(20), None),
+        ),
+        (
+            "row, search_log",
+            with(Strategy::Lazy2, on, None, None, Some(4)),
+            with(Strategy::Lazy2, on, None, None, Some(6)),
+        ),
+        (
+            "binary tree, min_match",
+            with(Strategy::BinaryTreeLazy2, off, Some(4), None, None),
+            with(Strategy::BinaryTreeLazy2, off, Some(6), None, None),
+        ),
+        (
+            "binary tree, chain_log",
+            with(Strategy::BinaryTreeLazy2, off, None, Some(11), None),
+            with(Strategy::BinaryTreeLazy2, off, None, Some(20), None),
+        ),
+        (
+            "optimal, chain_log",
+            with(Strategy::BinaryTreeOpt, off, None, Some(11), None),
+            with(Strategy::BinaryTreeOpt, off, None, Some(20), None),
+        ),
+    ] {
+        let fresh_first = Encoder::new()
+            .encode_all_with_options(&data, first)
+            .unwrap();
+        let fresh = Encoder::new()
+            .encode_all_with_options(&data, second)
+            .unwrap();
+        assert_ne!(
+            fresh_first, fresh,
+            "{label}: the two parameter sets give the same frame, so this row \
+             cannot tell a stale state from a fresh one"
+        );
+
+        let mut encoder = Encoder::new();
+        encoder.encode_all_with_options(&data, first).unwrap();
+        let reused = encoder.encode_all_with_options(&data, second).unwrap();
+        assert_eq!(
+            reused, fresh,
+            "{label}: a reused encoder carried the first encode's parameters into the second"
+        );
+        assert_eq!(decode_all(&reused).unwrap(), data);
+
+        // And back, so a row proves the reuse is symmetric rather than that
+        // one of the two parameter sets happens to win.
+        let back = encoder.encode_all_with_options(&data, first).unwrap();
+        assert_eq!(
+            back, fresh_first,
+            "{label}: reverting the parameter diverged"
+        );
+    }
+}
+
+/// A reused encoder produces the same frame as a fresh one when the row match
+/// finder is in use.
+///
+/// A dictionary offset does not outlive the window it was found in.
+///
+/// A dictionary may be referenced in full while its last byte is still inside
+/// the window, so an offset found then can legally exceed `Window_Size` -- the
+/// decoder holds the dictionary outside the window. What it cannot do is
+/// survive: once the frame has run far enough that C's `ZSTD_checkDictValidity`
+/// retires the dictionary, that offset addresses nothing either side can
+/// reach, and repeating it produces a frame this crate's own decoder rejects
+/// with `sequence offset exceeds the available history window`.
+///
+/// C retires the carried repeat offsets against the block's window at the top
+/// of every parser, under `if (dictMode == ZSTD_noDict)`. The guard is narrower
+/// than it reads: `dictMode` is recomputed per block, so a block whose
+/// dictionary has just been retired takes that clamp. This crate kept its
+/// prefixed parsers on the prefixed path across retirement and so skipped it.
+///
+/// `window_log` 10 against a 1408-byte body is what reaches it: the blocks are
+/// capped at the window, so the first ends at exactly 1024 and stays live --
+/// `blockEndIdx > maxDist + loadedDictEnd` is `1069 > 1069`, false -- while the
+/// second is retired. An offset of 1025 stored at source 989 in the first was
+/// repeated at source 1025 in the second, one byte past the window.
+#[test]
+fn a_dictionary_offset_does_not_outlive_the_window_it_was_found_in() {
+    // The fuzzer's input, for the reason the row-salt one is kept: the offset
+    // has to be found in the live block and still be `offset_1` at the first
+    // position of the retired one.
+    const REPRO: &[u8] =
+        include_bytes!("../dev/repro/dictionary-offset-outlives-window-fuzzer-found.bin");
+    let dictionary = &REPRO[8..53];
+    let body = &REPRO[53..];
+    assert_eq!(body.len(), 1408, "the reproducer changed shape");
+
+    let options = EncoderOptions {
+        write_dict_id: false,
+        write_content_size: false,
+        compression_level: CompressionLevel::try_new(7).unwrap(),
+        parameters: ParameterOverrides {
+            window_log: Some(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let encoder_dictionary = EncoderDictionary::new(dictionary).unwrap();
+    let decoder_dictionary = DecoderDictionary::new(dictionary).unwrap();
+
+    // Both finders, since the defect is in the floor rather than in any one
+    // parser: forcing the row finder off reproduced it just as well.
+    for row in [
+        RowMatchFinderMode::Enabled,
+        RowMatchFinderMode::Disabled,
+        RowMatchFinderMode::Auto,
+    ] {
+        let options = EncoderOptions {
+            parameters: ParameterOverrides {
+                use_row_match_finder: row,
+                ..options.parameters
+            },
+            ..options
+        };
+        let frame =
+            encode_all_with_prepared_dict_and_options(body, &encoder_dictionary, options).unwrap();
+        let decoded = decode_all_with_prepared_dict(&frame, &decoder_dictionary)
+            .unwrap_or_else(|e| panic!("{row:?}: this crate refused its own frame: {e}"));
+        assert_eq!(decoded, body, "{row:?}: dictionary round trip");
+    }
+
+    // The window that reproduces it is the narrow one, but nothing about the
+    // fix is specific to it: a window the body fits inside never retires the
+    // dictionary at all, and one below that retires it earlier.
+    for window_log in [10u32, 11, 12, 14, 17] {
+        let options = EncoderOptions {
+            parameters: ParameterOverrides {
+                window_log: Some(window_log),
+                ..options.parameters
+            },
+            ..options
+        };
+        let frame =
+            encode_all_with_prepared_dict_and_options(body, &encoder_dictionary, options).unwrap();
+        assert_eq!(
+            decode_all_with_prepared_dict(&frame, &decoder_dictionary).unwrap(),
+            body,
+            "window_log {window_log}"
+        );
+    }
+}
+
+/// `RowHashFinder::reset` used to rotate its hash salt rather than restore it,
+/// and the salt feeds every row hash, so the second frame filed the same bytes
+/// into different rows and came out a byte longer. No test above reached that:
+/// they either force the row finder off, or leave the parameters at the
+/// defaults, under which no level they sweep diverges.
+///
+/// The body is the fuzzer's, not a synthetic stand-in, because the divergence
+/// needs a surviving tag collision and that depends on the exact bytes. Eight
+/// pattern generators over eight sizes, eight levels and every `min_match`
+/// reproduced it on none of them; `dictionary_encode_roundtrip` found it in
+/// five minutes. What the fuzzer's input contributes is the collision, so the
+/// file is kept rather than reduced to a generator.
+///
+/// The two overrides below are the load-bearing ones, established by dropping
+/// each in turn: without `min_match` or with the finder left at `Auto` the
+/// frames agree. The dictionary the target used is not among them -- an empty
+/// one takes the same contiguous path as none at all -- so this reaches the
+/// defect through the plain entry point.
+///
+/// The fix has two halves and this covers both, in two sections, because
+/// either half alone passes the other's. Pinning the salt is what fixes the
+/// repeated encodes; clearing the tables is what fixes a frame that follows a
+/// different one, and needs its own body to reach.
+#[test]
+fn reusing_an_encoder_with_the_row_match_finder_reproduces_a_fresh_encode() {
+    // `dev/repro/row-hash-salt-reuse-fuzzer-found.bin` is a fuzz target input:
+    // eight control bytes, then the body seed. Its dictionary split byte is
+    // zero, so the remaining 448 bytes are the body the target encoded.
+    const REPRO: &[u8] = include_bytes!("../dev/repro/row-hash-salt-reuse-fuzzer-found.bin");
+    let body = &REPRO[8..];
+    assert_eq!(body.len(), 448, "the reproducer changed size");
+
+    let options = EncoderOptions {
+        compression_level: CompressionLevel::try_new(7).unwrap(),
+        parameters: ParameterOverrides {
+            min_match: Some(7),
+            use_row_match_finder: RowMatchFinderMode::Enabled,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let fresh = Encoder::new()
+        .encode_all_with_options(body, options)
+        .unwrap();
+
+    // Three rounds rather than two. A salt that rotated produced 108, 109, 108
+    // bytes, so a second encode alone reads as a state that merely alternates;
+    // the third is what shows the frame is fixed rather than periodic.
+    let mut encoder = Encoder::new();
+    for round in 0..3 {
+        let reused = encoder.encode_all_with_options(body, options).unwrap();
+        assert_eq!(
+            reused, fresh,
+            "encode {round} on a reused encoder diverged from a fresh one"
+        );
+        assert_eq!(decode_all(&reused).unwrap(), body);
+    }
+
+    // The half of the fix that clears the tables. The rounds above do not reach
+    // it: they re-encode one body, so a table kept from the previous frame
+    // holds what this frame would have filed anyway, and pinning the salt alone
+    // passes them. A stale entry only changes the parse when the previous frame
+    // filed *different* bytes at a position this one searches past -- entries
+    // at or beyond the search position are rejected already, so the previous
+    // frame also has to be no longer than this one.
+    //
+    // Hence a different body of the same size. With the salt pinned and the
+    // tables kept this comes out at 1199 bytes against a fresh encoder's 1197.
+    let target = build_random_field_records(4096);
+    let previous = build_incompressible_bytes(4096);
+    let stale_options = EncoderOptions {
+        compression_level: CompressionLevel::try_new(7).unwrap(),
+        parameters: ParameterOverrides {
+            strategy: Some(Strategy::Greedy),
+            min_match: Some(6),
+            use_row_match_finder: RowMatchFinderMode::Enabled,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut encoder = Encoder::new();
+    encoder
+        .encode_all_with_options(&previous, stale_options)
+        .unwrap();
+    let after_previous = encoder
+        .encode_all_with_options(&target, stale_options)
+        .unwrap();
+    let target_fresh = Encoder::new()
+        .encode_all_with_options(&target, stale_options)
+        .unwrap();
+    assert_eq!(
+        after_previous, target_fresh,
+        "a frame following a different one of the same size diverged from a fresh encode"
+    );
+    assert_eq!(decode_all(&after_previous).unwrap(), target);
 }
 
 /// A block whose matchable content starts after its first eighth still gets

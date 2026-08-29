@@ -1,16 +1,5 @@
 use super::*;
 
-/// Matches C's ZSTD_bitmix (based on XXH3_rrmxmx).
-#[inline(always)]
-fn bitmix(val: u64, len: u64) -> u64 {
-    let mut v = val;
-    v ^= v.rotate_right(49) ^ v.rotate_right(24);
-    v = v.wrapping_mul(0x9FB2_1C65_1E98_DF25);
-    v ^= (v >> 35).wrapping_add(len);
-    v = v.wrapping_mul(0x9FB2_1C65_1E98_DF25);
-    v ^ (v >> 28)
-}
-
 #[allow(dead_code)]
 pub(crate) fn plan_sequences_with_prefix_chain(
     src: &[u8],
@@ -1461,7 +1450,6 @@ impl RowHashFinder {
             row_hash_log,
             min_match: min_match.clamp(4, 6),
             next_to_update: 0,
-            // Matches the first CCtx row-hash salt produced by ZSTD_advanceHashSalt().
             hash_salt: DEFAULT_ROW_HASH_SALT,
         }
     }
@@ -1546,29 +1534,33 @@ impl RowHashFinder {
         self.next_to_update = end;
     }
 
+    /// Return the finder to the state [`Self::new`] would build, so a frame
+    /// encoded on a reused [`crate::Encoder`] is byte-identical to the same
+    /// frame encoded on a fresh one.
+    ///
+    /// This used to advance the salt and keep both tables, after C's
+    /// `ZSTD_advanceHashSalt()`, on the reasoning that old tags were computed
+    /// under the previous salt and so would stop matching. The salt feeds
+    /// every row hash, so that also moved the *live* bytes into different
+    /// rows, and two identical calls on one encoder emitted different frames.
+    /// `dictionary_encode_roundtrip` found it at level 7.
+    ///
+    /// Not advancing the salt is the half of that which fixes the live bytes.
+    /// Clearing the tables is the half that fixes the stale ones, and it is
+    /// obligatory only because of the first: under a salt that no longer
+    /// moves, the entries those old tags guard are valid again. C clears its
+    /// position table on every reset for the same reason and can leave the
+    /// tags dirty because its salt does move. Matching C past the first frame
+    /// was never available anyway, since it derives each salt from the
+    /// `hashSaltEntropy` it collects while compressing and this crate keeps no
+    /// such thing.
+    ///
+    /// The salt assignment below is therefore a no-op today -- nothing else
+    /// writes the field -- and is kept so that it stays one.
     pub(crate) fn reset(&mut self) {
-        // Rotate the hash salt instead of zeroing the tag table, matching
-        // C's ZSTD_advanceHashSalt().  Old tags become invalid because they
-        // were computed with the previous salt, so almost every stale entry
-        // stops matching.  This avoids zeroing ~640KB of hash + tag tables
-        // per frame.
-        //
-        // Almost, not all: tags are a few bits, so a stale entry can collide
-        // with the new salt's tag and be returned as a candidate. The position
-        // it carries belongs to the *previous* frame and can be anywhere,
-        // including past the end of the current source.
-        //
-        // This used to say those entries were caught by the `window_low`
-        // check in the search. They are not. `window_low` is a lower bound,
-        // and the failure is an upper-bound one: a position from a longer
-        // previous frame is too *large*, which no lower bound rejects. A 1 MiB
-        // frame followed by a 128 KiB one on the same `Encoder` produced
-        // candidate indices up to 995424 against a 131072-byte source, and
-        // both the prefetch and `count_match_length_unchecked` take those
-        // unchecked. `row_collect_match_indices_no_positions` now rejects any
-        // entry at or beyond the position being searched, which is what makes
-        // keeping the table across frames sound rather than merely lucky.
-        self.hash_salt = bitmix(self.hash_salt, 8) ^ bitmix(self.hash_salt.wrapping_add(1), 4);
+        self.hash_salt = DEFAULT_ROW_HASH_SALT;
+        self.hash_table.fill(0);
+        self.tag_table.fill(0);
         self.hash_cache = [0; ROW_HASH_CACHE_SIZE];
         self.next_to_update = 0;
     }
@@ -2392,12 +2384,9 @@ pub(crate) fn row_collect_match_indices_no_positions(
         }
         if (match_index as usize) >= search_pos {
             // A position at or beyond the byte being searched is not a
-            // candidate: an offset must point backwards. It can only be here
-            // because `RowMatchFinder::reset` deliberately leaves the position
-            // table populated between frames, and a tag collision let an entry
-            // from the previous frame survive the salt rotation. Skipping
-            // rather than breaking because bucket order says nothing about
-            // where such an entry sits relative to the live ones.
+            // candidate: an offset must point backwards. Skipping rather than
+            // breaking because bucket order says nothing about where such an
+            // entry sits relative to the live ones.
             //
             // Everything below this point treats the index as in-bounds and
             // behind `search_pos`: the prefetch offsets a raw pointer by it,
@@ -2405,6 +2394,15 @@ pub(crate) fn row_collect_match_indices_no_positions(
             // this filter a long frame followed by a shorter one on the same
             // `Encoder` read up to 864 KB past the end of the source. See
             // `reusing_an_encoder_across_a_long_then_short_frame_stays_in_bounds`.
+            //
+            // What used to put one here was `RowHashFinder::reset` keeping the
+            // position table between frames, where a tag collision could carry
+            // an entry from a previous and longer frame through the salt
+            // rotation. That reset now clears the table, so the contiguous
+            // parse cannot reach this. It stays because the bound is the one
+            // thing standing between a filed position and an unchecked raw
+            // pointer, and because the prefixed parses file positions from a
+            // dictionary rather than from `src`.
             continue;
         }
         if !src_base.is_null() {
@@ -2459,12 +2457,9 @@ pub(crate) fn row_collect_match_indices_with_positions(
         }
         if (match_index as usize) >= search_pos {
             // A position at or beyond the byte being searched is not a
-            // candidate: an offset must point backwards. It can only be here
-            // because `RowMatchFinder::reset` deliberately leaves the position
-            // table populated between frames, and a tag collision let an entry
-            // from the previous frame survive the salt rotation. Skipping
-            // rather than breaking because bucket order says nothing about
-            // where such an entry sits relative to the live ones.
+            // candidate: an offset must point backwards. Skipping rather than
+            // breaking because bucket order says nothing about where such an
+            // entry sits relative to the live ones.
             //
             // Everything below this point treats the index as in-bounds and
             // behind `search_pos`: the prefetch offsets a raw pointer by it,
@@ -2472,6 +2467,15 @@ pub(crate) fn row_collect_match_indices_with_positions(
             // this filter a long frame followed by a shorter one on the same
             // `Encoder` read up to 864 KB past the end of the source. See
             // `reusing_an_encoder_across_a_long_then_short_frame_stays_in_bounds`.
+            //
+            // What used to put one here was `RowHashFinder::reset` keeping the
+            // position table between frames, where a tag collision could carry
+            // an entry from a previous and longer frame through the salt
+            // rotation. That reset now clears the table, so the contiguous
+            // parse cannot reach this. It stays because the bound is the one
+            // thing standing between a filed position and an unchecked raw
+            // pointer, and because the prefixed parses file positions from a
+            // dictionary rather than from `src`.
             continue;
         }
         if !src_base.is_null() {
