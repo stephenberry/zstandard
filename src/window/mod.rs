@@ -49,6 +49,9 @@ pub(crate) struct ContiguousBlockMatchState {
     /// the parser a segment that begins after a match it never saw. Every
     /// other strategy keeps its own cursor on its own finder.
     fast_table_next_to_update: usize,
+    /// The parameters this state was built from, and the whole of what
+    /// [`Self::reset_if_compatible`] will reuse it for.
+    built_with: MatchFinderParameters,
 }
 
 #[derive(Debug, Clone)]
@@ -151,59 +154,44 @@ impl ContiguousBlockMatchState {
         Self {
             inner,
             fast_table_next_to_update: 0,
+            built_with: params,
         }
     }
 
-    /// Reset the match state for a new frame without re-allocating hash
-    /// tables. Returns true if the parameters match and reset was successful.
-    pub(crate) fn reset_if_compatible(&mut self, params: MatchFinderParameters) -> bool {
-        let reset = match &mut self.inner {
-            ContiguousBlockMatchStateInner::Fast(finder)
-                if params.parser_strategy == ParserStrategy::Fast
-                    && finder.hash_bits == tagged_match_hash_bits(params.hash_bits)
-                    && finder.min_match == params.min_match.clamp(4, 7) =>
-            {
-                finder.reset();
-                true
-            }
-            ContiguousBlockMatchStateInner::DoubleFast(finder)
-                if params.parser_strategy == ParserStrategy::DoubleFast
-                    && finder.long_hash_bits == match_hash_bits(params.hash_bits)
-                    && finder.short_hash_bits
-                        == tagged_match_hash_bits(params.secondary_hash_bits) =>
-            {
-                finder.reset();
-                true
-            }
-            ContiguousBlockMatchStateInner::Row(finder)
-                if params.parser_strategy.is_row_hash()
-                    && finder.row_hash_log + finder.row_log
-                        == params.hash_bits.clamp(10, MAX_MATCH_HASH_BITS) =>
-            {
-                finder.reset();
-                true
-            }
-            ContiguousBlockMatchStateInner::Chain(finder)
-                if params.parser_strategy.is_hash_chain()
-                    && finder.hash_bits == params.hash_bits.clamp(10, MAX_MATCH_HASH_BITS) =>
-            {
-                finder.reset();
-                true
-            }
-            ContiguousBlockMatchStateInner::BinaryTree(finder)
-                if params.parser_strategy.is_binary_tree()
-                    && finder.hash_bits == params.hash_bits.clamp(10, MAX_MATCH_HASH_BITS) =>
-            {
-                finder.reset();
-                finder.default_search_depth = params.search_depth;
-                true
-            }
-            _ => false,
-        };
-        if reset {
-            self.fast_table_next_to_update = 0;
+    /// Empty every table, returning the state to what [`Self::new`] would
+    /// build for the parameters it already holds.
+    pub(crate) fn reset(&mut self) {
+        match &mut self.inner {
+            ContiguousBlockMatchStateInner::Fast(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::DoubleFast(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::Row(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::Chain(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::BinaryTree(finder) => finder.reset(),
         }
-        reset
+        self.fast_table_next_to_update = 0;
+    }
+
+    /// [`Self::reset`], but only for a frame with the same parameters. Returns
+    /// false, leaving the state untouched, when it was built for different
+    /// ones and the caller must build a new one.
+    ///
+    /// The bar is equality of the whole parameter set rather than of the
+    /// fields that decide table geometry, which is stricter than reuse
+    /// strictly requires: two frames differing only in, say, `target_length`
+    /// could share tables and now do not. That costs an allocation on a frame
+    /// whose parameters changed -- no worse than the fresh state it replaces,
+    /// and only where a caller varies parameters between frames -- and it buys
+    /// a rule that stays true as parameters are added. The check this replaces
+    /// listed the geometry fields alone, so four of the five finders took a
+    /// state built at one `min_match` and parsed the next frame at another;
+    /// the finders keep their own clamped copies of `min_match`, `chain_log`
+    /// and `search_log`, and no `reset` restores them.
+    pub(crate) fn reset_if_compatible(&mut self, params: MatchFinderParameters) -> bool {
+        if self.built_with != params {
+            return false;
+        }
+        self.reset();
+        true
     }
 
     /// The alignment [`shift_positions`](Self::shift_positions) requires of its

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A reused `Encoder` could produce different bytes for the same input and options. The row match finder's reset rotated its hash salt instead of restoring it, following C's `ZSTD_advanceHashSalt()`, and the salt feeds every row hash, so a second frame filed the same bytes into different rows. It also kept the previous frame's tables, which C clears on every reset. Frames stayed valid and round-tripped; they were simply not reproducible. Found by the `dictionary_encode_roundtrip` fuzz target.
+- Changing `min_match` between two encodes on one `Encoder` parsed the second frame at the first one's match length, and the same held for `chain_log` and `search_log`. Reuse was gated on a hand-listed subset of the parameters, so four of the five match finders accepted a state built for different ones. Reuse is now gated on the whole parameter set, which costs an allocation on a frame whose parameters changed and cannot fall out of date as parameters are added.
+
 ## [0.1.2] - 2026-08-28
 
 ### Fixed

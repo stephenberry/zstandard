@@ -43,3 +43,29 @@ re-price it rather than hunt for a bug that is not there. Price anything against
 upstream before reading it as a defect, and never compare a fuzz-build timing
 with anything else: the fuzz build is about 29x release cost here, and a debug
 build 78x.
+
+## `row-hash-salt-reuse-fuzzer-found.bin`
+
+456 bytes for the `dictionary_encode_roundtrip` target: eight control bytes and
+a 448-byte body. The dictionary split byte is zero, so the dictionary is empty
+and the body is the rest of the file.
+
+```sh
+cargo +nightly fuzz run dictionary_encode_roundtrip dev/repro/row-hash-salt-reuse-fuzzer-found.bin
+```
+
+It decodes to level 7 with `min_match: 7` and the row match finder forced on,
+and it failed the target's reused-encoder assertion: 108 bytes on the first
+encode, 109 on the second, 108 on the third. `RowHashFinder::reset` rotated its
+hash salt rather than restoring it, following C's `ZSTD_advanceHashSalt()`, so
+the second frame filed the same bytes into different rows. The dictionary is
+incidental -- an empty one takes the same contiguous path as none -- and
+`encode_all_with_options` reproduces it just as well.
+
+Kept because the body is not reducible to a generator. The divergence needs a
+tag collision that survives the salt change, which depends on the exact bytes:
+eight pattern generators over eight sizes, eight levels and every `min_match`
+reproduced it on none of them, while the fuzzer found it in five minutes. It is
+also what `reusing_an_encoder_with_the_row_match_finder_reproduces_a_fresh_encode`
+encodes, via `include_bytes!`, so this file is load-bearing rather than
+archival.

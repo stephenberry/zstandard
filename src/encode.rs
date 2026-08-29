@@ -9781,8 +9781,9 @@ pub(crate) struct EntropyEncodeScratch {
     sequence_section: Vec<u8>,
     block_payload: Vec<u8>,
     /// Cached contiguous match state, reused across encode calls to avoid
-    /// per-frame hash table re-allocation.
-    cached_match_state: Option<(MatchFinderParameters, ContiguousBlockMatchState)>,
+    /// per-frame hash table re-allocation. The parameters it was built for
+    /// travel inside it, so a state built for different ones is refused.
+    cached_match_state: Option<ContiguousBlockMatchState>,
     /// Reusable output buffer, swapped in/out across encode calls to avoid
     /// per-frame heap allocation.
     output_buf: Vec<u8>,
@@ -10636,17 +10637,15 @@ fn encode_all_into_scratch(
         if dictionary_content.is_empty() {
             // Reuse cached match state when parameters are compatible, avoiding
             // per-frame hash table re-allocation.
-            let mut match_state = {
-                let mut reused = None;
-                if let Some((_, mut cached)) = scratch.cached_match_state.take() {
-                    if cached.reset_if_compatible(params.match_finder) {
-                        reused = Some(cached);
-                    }
-                }
-                reused.unwrap_or_else(|| {
-                    ContiguousBlockMatchState::new(src.len(), params.match_finder)
+            let mut match_state = scratch
+                .cached_match_state
+                .take()
+                .and_then(|mut cached| {
+                    cached
+                        .reset_if_compatible(params.match_finder)
+                        .then_some(cached)
                 })
-            };
+                .unwrap_or_else(|| ContiguousBlockMatchState::new(src.len(), params.match_finder));
             let mut ldm = params
                 .ldm
                 .map(|ldm| LdmFrameState::new(ldm, params.max_history_bytes));
@@ -10705,7 +10704,7 @@ fn encode_all_into_scratch(
                 block_start = block_end;
             }
             // Cache match state for reuse in the next call.
-            scratch.cached_match_state = Some((params.match_finder, match_state));
+            scratch.cached_match_state = Some(match_state);
         } else {
             // `dictionary_content` is read off `dictionary` above, so content
             // this branch can see implies the dictionary it came from.
@@ -11748,11 +11747,7 @@ pub(crate) fn seed_optimal_prices_from_first_block(
     // achieves this by sliding the window forward over the block rather than
     // by clearing the tables, which comes to the same thing for a match state
     // that holds nothing else.
-    let reset = match_state.reset_if_compatible(params.match_finder);
-    debug_assert!(
-        reset,
-        "the match state was built for these parameters a few lines ago"
-    );
+    match_state.reset();
     scratch.planned_sequences.opt_price_state = price_state;
     Ok(())
 }

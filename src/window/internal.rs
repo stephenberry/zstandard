@@ -200,6 +200,12 @@ pub(crate) const OPT_PRICE_UNIT: u32 = 1 << OPT_PRICE_ACCURACY_LOG;
 pub(crate) const OPT_LITERAL_FREQ_ADD: u32 = 2;
 pub(crate) const OPT_PREDEFINED_THRESHOLD: usize = 8;
 pub(crate) const LAZY_SKIPPING_STEP: usize = 8;
+/// The row-hash salt every frame is encoded under: `ZSTD_bitmix(0, 8) ^
+/// ZSTD_bitmix(0, 4)`, what C's `ZSTD_advanceHashSalt()` yields on a zeroed
+/// context, so this crate salts every frame as C salts its first.
+///
+/// C advances from here on each reset; this does not, and
+/// [`super::lazy::RowHashFinder::reset`] says why.
 pub(crate) const DEFAULT_ROW_HASH_SALT: u64 = 0x8358_92B4_BB2C_AE74;
 
 /// One past the last position in a `len`-byte buffer whose `MIN_MATCH`-byte
