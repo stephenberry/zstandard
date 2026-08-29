@@ -4428,6 +4428,93 @@ fn switching_parameters_on_a_reused_encoder_matches_a_fresh_one() {
 /// A reused encoder produces the same frame as a fresh one when the row match
 /// finder is in use.
 ///
+/// A dictionary offset does not outlive the window it was found in.
+///
+/// A dictionary may be referenced in full while its last byte is still inside
+/// the window, so an offset found then can legally exceed `Window_Size` -- the
+/// decoder holds the dictionary outside the window. What it cannot do is
+/// survive: once the frame has run far enough that C's `ZSTD_checkDictValidity`
+/// retires the dictionary, that offset addresses nothing either side can
+/// reach, and repeating it produces a frame this crate's own decoder rejects
+/// with `sequence offset exceeds the available history window`.
+///
+/// C retires the carried repeat offsets against the block's window at the top
+/// of every parser, under `if (dictMode == ZSTD_noDict)`. The guard is narrower
+/// than it reads: `dictMode` is recomputed per block, so a block whose
+/// dictionary has just been retired takes that clamp. This crate kept its
+/// prefixed parsers on the prefixed path across retirement and so skipped it.
+///
+/// `window_log` 10 against a 1408-byte body is what reaches it: the blocks are
+/// capped at the window, so the first ends at exactly 1024 and stays live --
+/// `blockEndIdx > maxDist + loadedDictEnd` is `1069 > 1069`, false -- while the
+/// second is retired. An offset of 1025 stored at source 989 in the first was
+/// repeated at source 1025 in the second, one byte past the window.
+#[test]
+fn a_dictionary_offset_does_not_outlive_the_window_it_was_found_in() {
+    // The fuzzer's input, for the reason the row-salt one is kept: the offset
+    // has to be found in the live block and still be `offset_1` at the first
+    // position of the retired one.
+    const REPRO: &[u8] =
+        include_bytes!("../dev/repro/dictionary-offset-outlives-window-fuzzer-found.bin");
+    let dictionary = &REPRO[8..53];
+    let body = &REPRO[53..];
+    assert_eq!(body.len(), 1408, "the reproducer changed shape");
+
+    let options = EncoderOptions {
+        write_dict_id: false,
+        write_content_size: false,
+        compression_level: CompressionLevel::try_new(7).unwrap(),
+        parameters: ParameterOverrides {
+            window_log: Some(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let encoder_dictionary = EncoderDictionary::new(dictionary).unwrap();
+    let decoder_dictionary = DecoderDictionary::new(dictionary).unwrap();
+
+    // Both finders, since the defect is in the floor rather than in any one
+    // parser: forcing the row finder off reproduced it just as well.
+    for row in [
+        RowMatchFinderMode::Enabled,
+        RowMatchFinderMode::Disabled,
+        RowMatchFinderMode::Auto,
+    ] {
+        let options = EncoderOptions {
+            parameters: ParameterOverrides {
+                use_row_match_finder: row,
+                ..options.parameters
+            },
+            ..options
+        };
+        let frame =
+            encode_all_with_prepared_dict_and_options(body, &encoder_dictionary, options).unwrap();
+        let decoded = decode_all_with_prepared_dict(&frame, &decoder_dictionary)
+            .unwrap_or_else(|e| panic!("{row:?}: this crate refused its own frame: {e}"));
+        assert_eq!(decoded, body, "{row:?}: dictionary round trip");
+    }
+
+    // The window that reproduces it is the narrow one, but nothing about the
+    // fix is specific to it: a window the body fits inside never retires the
+    // dictionary at all, and one below that retires it earlier.
+    for window_log in [10u32, 11, 12, 14, 17] {
+        let options = EncoderOptions {
+            parameters: ParameterOverrides {
+                window_log: Some(window_log),
+                ..options.parameters
+            },
+            ..options
+        };
+        let frame =
+            encode_all_with_prepared_dict_and_options(body, &encoder_dictionary, options).unwrap();
+        assert_eq!(
+            decode_all_with_prepared_dict(&frame, &decoder_dictionary).unwrap(),
+            body,
+            "window_log {window_log}"
+        );
+    }
+}
+
 /// `RowHashFinder::reset` used to rotate its hash salt rather than restore it,
 /// and the salt feeds every row hash, so the second frame filed the same bytes
 /// into different rows and came out a byte longer. No test above reached that:

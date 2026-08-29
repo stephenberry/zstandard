@@ -69,3 +69,30 @@ reproduced it on none of them, while the fuzzer found it in five minutes. It is
 also what `reusing_an_encoder_with_the_row_match_finder_reproduces_a_fresh_encode`
 encodes, via `include_bytes!`, so this file is load-bearing rather than
 archival.
+
+## `dictionary-offset-outlives-window-fuzzer-found.bin`
+
+1461 bytes for the `dictionary_encode_roundtrip` target: eight control bytes,
+then a 45-byte dictionary and a 1408-byte body.
+
+```sh
+cargo +nightly fuzz run dictionary_encode_roundtrip dev/repro/dictionary-offset-outlives-window-fuzzer-found.bin
+```
+
+It decodes to level 7 at `window_log` 10, and produced a frame this crate's own
+decoder refused: `sequence offset exceeds the available history window`. Blocks
+are capped at the window, so the body splits at 1024. The first block keeps the
+dictionary -- C retires it on `blockEndIdx > maxDist + loadedDictEnd`, which is
+`1069 > 1069` and false -- and an offset of 1025 found there is legal, because a
+dictionary may be referenced in full while its last byte is in the window and
+the decoder holds it outside the window. The second block is retired, and that
+offset was still `offset_1`, so the parser repeated it at source 1025: one byte
+past the window, addressing nothing either side can reach.
+
+The missing step was C's block-start repeat-offset clamp, which it applies under
+`if (dictMode == ZSTD_noDict)` -- a guard that catches a retired dictionary too,
+since `dictMode` is recomputed per block. Kept because the offset has to be
+found in the live block and still be `offset_1` at the first position of the
+retired one, which is not a shape worth rediscovering by hand;
+`a_dictionary_offset_does_not_outlive_the_window_it_was_found_in` is the same
+frame.

@@ -1808,7 +1808,40 @@ fn plan_sequences_for_prefixed_contiguous_segment_into(
         rep_window_low,
         prefix_retired,
     } = floors;
-    match &mut state.inner {
+    // C retires the repeat offsets carried in from the previous block against
+    // this block's window, in `ZSTD_compressBlock_lazy_generic` and its
+    // siblings, under `if (dictMode == ZSTD_noDict)`. That guard reads as "only
+    // when there is no dictionary" and means something narrower: `dictMode` is
+    // recomputed per block from `ms->dictMatchState`, which
+    // `ZSTD_checkDictValidity` has just set to NULL if the block ends past
+    // `maxDist + loadedDictEnd`. A block whose prefix has retired *is* C's
+    // no-dictionary case, and takes the clamp.
+    //
+    // Only `Fast` switches parsers on retirement here, so for every other one
+    // the clamp has to happen on this side of the dispatch. Without it an
+    // offset found while the prefix was live -- which may legally exceed
+    // `maxDist`, since the decoder holds the dictionary outside the window --
+    // survives in `offset_1` into a block that can no longer reach it, and the
+    // parser repeats it. That is a frame this crate's own decoder rejects, and
+    // `dictionary_encode_roundtrip` found one: a 45-byte dictionary at
+    // `window_log` 10, offset 1025 stored at source 989 and repeated at 1025.
+    let (repeat_offsets, saved1, saved2) = if prefix_retired {
+        let (clamped, _, _, saved1, saved2) = invalidate_no_dict_repeat_offsets(
+            repeat_offsets,
+            block_start,
+            match_floor.at(block_start).1,
+        );
+        (clamped, saved1, saved2)
+    } else {
+        (repeat_offsets, 0, 0)
+    };
+    let restore = |plan: &mut SequencePlan| {
+        if prefix_retired {
+            plan.repeat_offsets =
+                restore_invalidated_repeat_offsets(plan.repeat_offsets, saved1, saved2);
+        }
+    };
+    let result = match &mut state.inner {
         PrefixedBlockMatchStateInner::Row {
             prefix_finder,
             src_finder,
@@ -1949,7 +1982,9 @@ fn plan_sequences_for_prefixed_contiguous_segment_into(
             *mode,
             ldm,
         ),
-    }
+    };
+    restore(plan);
+    result
 }
 
 /// C's `ZSTD_ldm_blockCompress` for a frame that carries a dictionary: the
