@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `StreamingDecoder` is 256 bytes by value instead of 35,520, and `io::Reader` 304 instead of 35,584. A frame's decoding tables are now boxed for the life of the frame rather than carried inline, so a decoder embeds in an enum, a future, or a small stack without ceremony. Costs one allocation per frame: bulk decode shows no measurable difference, back-to-back tiny frames pay about 2%.
+- `StreamingDecoder` is 256 bytes by value instead of 35,520, and `io::Reader` 304 instead of 35,584. A frame's decoding tables now live behind one allocation the decoder holds and reuses across frames rather than inline, so a decoder embeds in an enum, a future, or a small stack without ceremony. Throughput is unchanged: a decoder allocates the tables once however many frames it decodes. Only a decoder discarded after every frame allocates per frame, and that costs about 1% on frames as small as 24 KiB.
 
 ### Documentation
 

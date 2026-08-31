@@ -761,6 +761,89 @@ fn streaming_encoder_survives_blocks_that_shrink_across_flushes() {
     }
 }
 
+/// A decoder that recycles its frame allocation still decodes every frame right.
+///
+/// `StreamingDecoder` keeps the previous frame's `FrameDecodeState` allocation
+/// and assigns the next frame into it whole. This feeds one decoder a run of
+/// deliberately unalike frames -- different corpora, dictionaries on some and
+/// not others, checksums on and off, dictionary frames either side of a
+/// dictionary-less one -- because a run of identical frames would agree even if
+/// state were being shared outright.
+///
+/// **How much of this is measured.** Carrying `repeat_offsets` across frames is
+/// caught here. Carrying `literals_state` or `sequence_tables` is *not*, by this
+/// test or by any other in the suite: both were injected deliberately and
+/// everything still passed. A stale entropy table is invisible until a frame
+/// opens a section in `Repeat` mode against it, and frames from this crate's own
+/// encoder do not, so no test built on encoder output can reach it. What rules
+/// those two out is structural rather than empirical -- the decoder assigns the
+/// whole struct and the compiler requires every field -- which is why the note
+/// at that assignment says not to unpick it into per-field stores.
+#[test]
+fn a_recycled_decoder_decodes_every_frame_like_a_fresh_one() {
+    let dictionary = build_structured_log_pattern(64 * 1024);
+    let encoder_dict = EncoderDictionary::new(&dictionary).unwrap();
+    let decoder_dict = DecoderDictionary::new(&dictionary).unwrap();
+
+    let bodies = [
+        build_repeated_chunk_pattern(40_000),
+        build_huff_friendly_pattern(36_000),
+        build_dictionary_echo_pattern(&dictionary, 44_000),
+        build_incompressible_pattern(12_000),
+        build_dense_sequence_pattern(52_000),
+        build_dictionary_echo_pattern(&dictionary, 28_000),
+        build_structured_log_pattern(48_000),
+    ];
+
+    // Every fourth frame carries a dictionary, so a dictionary frame follows a
+    // dictionary-less one and vice versa.
+    let frames: Vec<(Vec<u8>, bool)> = bodies
+        .iter()
+        .enumerate()
+        .map(|(index, body)| {
+            let with_dict = index % 3 == 2;
+            let options = EncoderOptions {
+                checksum: index % 2 == 0,
+                compression_level: CompressionLevel::BETTER,
+                ..Default::default()
+            };
+            let frame = if with_dict {
+                encode_all_with_prepared_dict_and_options(body, &encoder_dict, options).unwrap()
+            } else {
+                encode_all_with_options(body, options).unwrap()
+            };
+            (frame, with_dict)
+        })
+        .collect();
+
+    let mut recycled = StreamingDecoder::with_prepared_dict(
+        &decoder_dict,
+        DecoderOptions {
+            single_frame: true,
+            ..Default::default()
+        },
+    );
+
+    for (index, ((frame, _), body)) in frames.iter().zip(bodies.iter()).enumerate() {
+        if index > 0 {
+            recycled.reset().unwrap();
+        }
+        recycled.push(frame).unwrap();
+        recycled.finish().unwrap();
+        let from_recycled = recycled.take_output();
+
+        assert_eq!(
+            from_recycled.len(),
+            body.len(),
+            "frame {index} decoded to the wrong length on a recycled decoder"
+        );
+        assert_eq!(
+            from_recycled, *body,
+            "frame {index} decoded differently on a recycled decoder than it was encoded from"
+        );
+    }
+}
+
 /// A reset context still produces frames that decode to what went in.
 ///
 /// This is the round-trip half of the question and the weaker half: state that
