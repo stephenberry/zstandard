@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `StreamingDecoder` is 256 bytes by value instead of 35,520, and `io::Reader` 304 instead of 35,584. A frame's decoding tables are now boxed for the life of the frame rather than carried inline, so a decoder embeds in an enum, a future, or a small stack without ceremony. Costs one allocation per frame: bulk decode shows no measurable difference, back-to-back tiny frames pay about 2%.
+
+### Documentation
+
+- The encode types state their footprint. `io::Writer` and `StreamingEncoder` are ~25 KB by value and `Encoder` ~19 KB, because the Huffman and literals workspaces are inline arrays; each now says so and tells callers to box it when embedding. `tests/footprint.rs` pins the numbers.
+
 ## [0.1.3] - 2026-08-28
 
 ### Fixed

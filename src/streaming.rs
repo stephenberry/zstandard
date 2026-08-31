@@ -34,6 +34,17 @@ use crate::{
 /// to drain produced bytes; finalize the frame with [`finish`](Self::finish),
 /// then optionally [`reset`](Self::reset) to begin a new frame on the same
 /// context (preserving allocations and dictionary).
+///
+/// # Footprint
+///
+/// Roughly 25 KB by value. The bulk is the Huffman compression workspace and the
+/// literals encoding state, held as inline arrays so the per-block path reaches
+/// them without an indirection and reuses them across blocks and frames. The
+/// cost is that the type is unpleasant to embed: it will trip
+/// `clippy::large_enum_variant` in an enum, and it enlarges any future holding
+/// it across an `await`. Box it when it is not a local. Everything wrapping an
+/// encoder inherits this, [`Writer`](crate::io::Writer) included;
+/// [`StreamingDecoder`] is a few hundred bytes and needs none of it.
 pub struct StreamingEncoder<'a> {
     options: EncoderOptions,
     dictionary: Option<EncoderDictionary<'a>>,
@@ -970,6 +981,13 @@ impl Default for StreamingEncoder<'static> {
 /// decoded bytes. Call [`finish`](Self::finish) once the input stream ends to
 /// validate frame trailers; a context can be re-used for another stream via
 /// [`reset`](Self::reset).
+///
+/// # Footprint
+///
+/// 256 bytes by value, so it embeds without ceremony. A frame's FSE and Huffman
+/// decoding tables are ~35 KB, but they are allocated per frame rather than
+/// carried inline. Bulk decode shows no measurable difference for that; only
+/// very small frames decoded back to back pay for it.
 pub struct StreamingDecoder<'a> {
     options: DecoderOptions,
     dictionary: Option<Dictionary<'a>>,
@@ -988,7 +1006,13 @@ pub struct StreamingDecoder<'a> {
     /// Scratch for the literals section, reused across blocks.
     literals_scratch: Vec<u8>,
     state: DecoderState,
-    current_frame: Option<FrameDecodeState>,
+    /// Boxed rather than inline: this is ~35 KB of entropy tables and was the
+    /// whole weight of the decoder. The trade is one allocation per frame, paid
+    /// where frames are tiny and back to back -- decoding 24 KiB frames on a
+    /// fresh decoder each time costs about 2%. If that ever needs recovering,
+    /// the fix is to keep the box across frames and reinitialize it in place
+    /// rather than to unbox.
+    current_frame: Option<Box<FrameDecodeState>>,
     total_output_size: u64,
     received_input: bool,
     finished_input: bool,
@@ -1067,8 +1091,9 @@ impl<'a> StreamingDecoder<'a> {
     }
 
     /// Reset to the initial state so the context can decode another stream,
-    /// preserving allocations and the configured dictionary. Must follow a
-    /// successful [`finish`](Self::finish).
+    /// preserving the input and output buffers and the configured dictionary.
+    /// The frame's decode tables are not preserved; they are allocated per
+    /// frame. Must follow a successful [`finish`](Self::finish).
     pub fn reset(&mut self) -> Result<()> {
         self.finish_status()?;
         self.reset_state();
@@ -1376,7 +1401,7 @@ impl<'a> StreamingDecoder<'a> {
 
         let checksum = header.checksum;
         let window_size = usize::try_from(header.window_size).unwrap_or(usize::MAX);
-        self.current_frame = Some(FrameDecodeState {
+        self.current_frame = Some(Box::new(FrameDecodeState {
             literals_state: dictionary
                 .map_or_else(LiteralsState::default, Dictionary::literals_state),
             sequence_tables: dictionary
@@ -1390,7 +1415,7 @@ impl<'a> StreamingDecoder<'a> {
             // this frame starts after it rather than at zero.
             frame_start: self.output.len(),
             header,
-        });
+        }));
         Ok(())
     }
 
