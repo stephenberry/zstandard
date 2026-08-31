@@ -10198,6 +10198,14 @@ pub fn profile_first_block_with_prepared_dict_and_options(
 }
 
 /// Reusable one-shot encoder that amortizes buffer allocation across calls.
+///
+/// # Footprint
+///
+/// Roughly 19 KB by value: the scratch is mostly the Huffman compression
+/// workspace, held as inline arrays rather than behind a pointer. Being reusable
+/// this is a type callers tend to store, so box it where it would otherwise sit
+/// in an enum, in a future held across an `await`, or on a small stack.
+/// [`Decoder`](crate::Decoder) is tens of bytes and needs no such care.
 pub struct Encoder {
     scratch: EntropyEncodeScratch,
 }

@@ -34,6 +34,17 @@ use crate::{
 /// to drain produced bytes; finalize the frame with [`finish`](Self::finish),
 /// then optionally [`reset`](Self::reset) to begin a new frame on the same
 /// context (preserving allocations and dictionary).
+///
+/// # Footprint
+///
+/// Roughly 25 KB by value. The bulk is the Huffman compression workspace and the
+/// literals encoding state, held as inline arrays so the per-block path reaches
+/// them without an indirection and reuses them across blocks and frames. The
+/// cost is that the type is unpleasant to embed: it will trip
+/// `clippy::large_enum_variant` in an enum, and it enlarges any future holding
+/// it across an `await`. Box it when it is not a local. Everything wrapping an
+/// encoder inherits this, [`Writer`](crate::io::Writer) included;
+/// [`StreamingDecoder`] is a few hundred bytes and needs none of it.
 pub struct StreamingEncoder<'a> {
     options: EncoderOptions,
     dictionary: Option<EncoderDictionary<'a>>,
@@ -970,6 +981,14 @@ impl Default for StreamingEncoder<'static> {
 /// decoded bytes. Call [`finish`](Self::finish) once the input stream ends to
 /// validate frame trailers; a context can be re-used for another stream via
 /// [`reset`](Self::reset).
+///
+/// # Footprint
+///
+/// 256 bytes by value, so it embeds without ceremony. A frame's FSE and Huffman
+/// decoding tables are ~35 KB, but they live behind one allocation the decoder
+/// holds and reuses from frame to frame rather than inline. A decoder decoding
+/// many frames allocates them once; only one thrown away after every frame pays
+/// per frame, and that at about 1% on frames as small as 24 KiB.
 pub struct StreamingDecoder<'a> {
     options: DecoderOptions,
     dictionary: Option<Dictionary<'a>>,
@@ -988,7 +1007,26 @@ pub struct StreamingDecoder<'a> {
     /// Scratch for the literals section, reused across blocks.
     literals_scratch: Vec<u8>,
     state: DecoderState,
-    current_frame: Option<FrameDecodeState>,
+    /// Boxed rather than inline: this is ~35 KB of entropy tables and was the
+    /// whole weight of the decoder, which by value made `StreamingDecoder`
+    /// 35,520 bytes rather than 256. The box is not freed between frames; see
+    /// `spare_frame`.
+    current_frame: Option<Box<FrameDecodeState>>,
+    /// The finished frame's box, kept for the next frame to assign into.
+    ///
+    /// Without it every frame in a stream would allocate and free ~35 KB of its
+    /// own, which is the entire cost of boxing `current_frame` and is what made
+    /// small frames measure slower than they did when the tables were inline.
+    /// With it a decoder allocates them once however many frames it decodes, and
+    /// 24 KiB frames on a `reset` decoder run at the speed they did before the
+    /// boxing. A decoder discarded after each frame is the one shape this cannot
+    /// help, and it is the shape `reset` exists to avoid.
+    ///
+    /// Only ever an allocation, never state: the next frame overwrites it whole
+    /// before reading a byte of it. The cost is that a decoder parked between
+    /// streams holds 35 KB it is not using; freeing it would mean allocating
+    /// again on the next frame, which is the thing this exists to avoid.
+    spare_frame: Option<Box<FrameDecodeState>>,
     total_output_size: u64,
     received_input: bool,
     finished_input: bool,
@@ -1067,8 +1105,9 @@ impl<'a> StreamingDecoder<'a> {
     }
 
     /// Reset to the initial state so the context can decode another stream,
-    /// preserving allocations and the configured dictionary. Must follow a
-    /// successful [`finish`](Self::finish).
+    /// preserving the input and output buffers, the frame decode tables'
+    /// allocation, and the configured dictionary. Must follow a successful
+    /// [`finish`](Self::finish).
     pub fn reset(&mut self) -> Result<()> {
         self.finish_status()?;
         self.reset_state();
@@ -1185,6 +1224,7 @@ impl<'a> StreamingDecoder<'a> {
             literals_scratch: Vec::new(),
             state: DecoderState::FrameHeader,
             current_frame: None,
+            spare_frame: None,
             total_output_size: 0,
             received_input: false,
             finished_input: false,
@@ -1376,7 +1416,7 @@ impl<'a> StreamingDecoder<'a> {
 
         let checksum = header.checksum;
         let window_size = usize::try_from(header.window_size).unwrap_or(usize::MAX);
-        self.current_frame = Some(FrameDecodeState {
+        let frame = FrameDecodeState {
             literals_state: dictionary
                 .map_or_else(LiteralsState::default, Dictionary::literals_state),
             sequence_tables: dictionary
@@ -1390,6 +1430,28 @@ impl<'a> StreamingDecoder<'a> {
             // this frame starts after it rather than at zero.
             frame_start: self.output.len(),
             header,
+        };
+        // Into the previous frame's box where there is one. Assigning the whole
+        // struct is what makes this safe, and it must stay that way: `frame`
+        // above is the same initializer a fresh `Box::new` would take, the
+        // compiler requires every field in it, and the assignment overwrites
+        // every field. Only the allocation is reused.
+        //
+        // Do not "optimize" this into a field-by-field reinitialization that
+        // skips the entropy tables. It would appear to work: a stale
+        // `sequence_tables` or `literals_state` is invisible until a frame opens
+        // a section in `Repeat` mode against it, and frames from this crate's
+        // encoder do not, so the whole test suite passes with either one
+        // deliberately carried over -- verified by injecting exactly that. The
+        // reader that would catch it is someone else's encoder, in the field,
+        // producing silently wrong bytes. Only `repeat_offsets` is caught by
+        // tests, in `a_recycled_decoder_decodes_every_frame_like_a_fresh_one`.
+        self.current_frame = Some(match self.spare_frame.take() {
+            Some(mut recycled) => {
+                *recycled = frame;
+                recycled
+            }
+            None => Box::new(frame),
         });
         Ok(())
     }
@@ -1480,6 +1542,7 @@ impl<'a> StreamingDecoder<'a> {
             }
         }
         self.decoded_a_frame = true;
+        self.spare_frame = Some(frame);
         Ok(())
     }
 
@@ -1622,7 +1685,10 @@ impl<'a> StreamingDecoder<'a> {
         self.input.clear();
         self.input_pos = 0;
         self.state = DecoderState::FrameHeader;
-        self.current_frame = None;
+        // Kept rather than dropped, so a reset decoder starts its next frame
+        // without allocating. An abandoned frame's box is as reusable as a
+        // completed one's: the next frame overwrites it whole.
+        self.spare_frame = self.current_frame.take().or(self.spare_frame.take());
         self.total_output_size = 0;
         self.received_input = false;
         self.finished_input = false;

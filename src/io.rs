@@ -81,6 +81,22 @@ impl From<Error> for io::Error {
 /// buffered but **does not** write the final block, leaving a truncated frame;
 /// there is no way to report an error from `Drop`, so the frame tail is your
 /// responsibility.
+///
+/// # Footprint
+///
+/// Roughly 25 KB by value, nearly all of it the [`StreamingEncoder`] inside;
+/// see its footprint note for why. Box it when it is going anywhere other than
+/// a local:
+///
+/// ```
+/// # use zstandard::io::Writer;
+/// enum Sink {
+///     Plain(Vec<u8>),
+///     Compressed(Box<Writer<'static, Vec<u8>>>),
+/// }
+/// # let _ = Sink::Compressed(Box::new(Writer::new(Vec::new())?));
+/// # Ok::<(), std::io::Error>(())
+/// ```
 pub struct Writer<'a, W: Write> {
     inner: Option<W>,
     encoder: StreamingEncoder<'a>,
@@ -205,6 +221,9 @@ impl<W: Write> std::fmt::Debug for Writer<'_, W> {
 /// [`decode_all`](crate::decode_all). Set
 /// [`DecoderOptions::single_frame`](crate::DecoderOptions::single_frame) to
 /// stop at the first frame and reject anything after it.
+///
+/// A few hundred bytes by value, so unlike [`Writer`] it embeds anywhere without
+/// ceremony; the frame's ~35 KB of decode tables are allocated per frame.
 pub struct Reader<'a, R: Read> {
     inner: R,
     decoder: StreamingDecoder<'a>,
