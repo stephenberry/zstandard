@@ -1,10 +1,26 @@
 name: Coverage
 
+# Which lines the suite never reaches — the decode error branches above all,
+# where a line nothing exercises is a latent defect rather than dead weight.
+# Codecov gets an LCOV report. Nothing here gates a merge: there are no
+# thresholds, `fail_ci_if_error` is off, and `main` is not protected.
+#
+# It runs weekly rather than on every push, for the reason `miri.yml` gives for
+# doing the same. A pass takes around fifteen minutes against CI's nine, which
+# is too long to sit in front of every change in exchange for a number nothing
+# acts on, and firing on both `push` and `pull_request` measured every merged
+# branch twice over. This is a sweep for what the suite has stopped reaching,
+# not a verdict on one commit.
+#
+# Run it directly on anything that adds a code path — `gh workflow run
+# coverage.yml`, or the Actions tab.
+
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+  schedule:
+    # 04:00 UTC on Saturdays, clear of the daily fuzz run at 06:00 and of the
+    # weekly Miri sweep at the same hour on Sunday.
+    - cron: "0 4 * * 6"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +53,8 @@ jobs:
       # value is untouched here, because the same 68 tests run in all four `CI`
       # test legs on every push. What it costs *this* workflow was measured
       # rather than assumed: running it takes the job from ~8 to ~28 minutes
-      # locally, and buys 179 lines of library coverage, or 1.1 points
+      # locally — on the runners the skipping job lands nearer fifteen — and
+      # buys 179 lines of library coverage, or 1.1 points
       # (81.5% against 80.4%). The apparent 23-point drop in the file-level
       # total is the suite and its harness measuring themselves -- 7,041 lines
       # of `src/support/upstream_zstd.rs` exist only to drive the C library and
