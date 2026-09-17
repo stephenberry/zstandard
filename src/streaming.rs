@@ -1484,6 +1484,12 @@ impl<'a> StreamingDecoder<'a> {
     }
 
     fn start_frame(&mut self, header: ZstandardFrameHeader) -> Result<()> {
+        // Before the borrow of `self.dictionary` below, and before this frame
+        // reads `output.len()` for its `frame_start`. Running it ahead of the
+        // rejections costs nothing: compaction is safe in every state, and a
+        // frame that fails to open leaves a decoder nobody decodes from again.
+        self.compact_between_frames();
+
         let dictionary = match (self.dictionary.as_ref(), header.dictionary_id) {
             (None, Some(dictionary_id)) => {
                 return Err(Error::DictionaryRequired(Some(dictionary_id)));
@@ -1719,6 +1725,13 @@ impl<'a> StreamingDecoder<'a> {
         // for the buffer to empty instead, which is the branch above. The
         // next frame's `frame_start` accounts for whatever is still here,
         // and once it opens the window rule applies again.
+        //
+        // The prefix is not left here forever: `compact_between_frames` takes
+        // it when the next frame opens, which is where no match can reach back
+        // across it.
+        // Without that, this early return would be a leak -- the branch above
+        // is the only other thing that reclaims it, and a caller that never
+        // drains the buffer to empty never reaches it.
         if self.current_frame.is_none() {
             return;
         }
@@ -1726,6 +1739,36 @@ impl<'a> StreamingDecoder<'a> {
             self.output.drain(..droppable);
             self.output_pos -= droppable;
             self.release_history(droppable);
+        }
+    }
+
+    /// Drop the prefix earlier frames left behind, before this frame records
+    /// where it starts.
+    ///
+    /// [`compact_output`](Self::compact_output) returns early between frames
+    /// rather than doing this itself, because there it would be moving bytes
+    /// the caller is about to take. The cost of that is that its full-drain
+    /// branch becomes the only thing reclaiming the prefix, and a caller that
+    /// stops a few bytes short of empty never reaches it -- so the prefix has
+    /// to be collected somewhere, and a frame boundary is the one point where
+    /// no match can reach back across it.
+    ///
+    /// Same half-buffer rule as compaction, and for the same reason: it bounds
+    /// the memmove to what it leaves behind. Dropping the prefix
+    /// unconditionally here looks free, and is not. A caller reading a little
+    /// from each of many frames accumulates a small prefix under a large
+    /// undrained body, and moving that body once per frame is quadratic in the
+    /// number of frames, for bytes nobody was waiting on.
+    ///
+    /// Pinned by `concatenated_frames_do_not_accumulate_drained_output`.
+    fn compact_between_frames(&mut self) {
+        debug_assert!(
+            self.current_frame.is_none(),
+            "a frame is opening while another is still current"
+        );
+        if self.output_pos != 0 && self.output_pos * 2 >= self.output.len() {
+            self.output.drain(..self.output_pos);
+            self.output_pos = 0;
         }
     }
 
@@ -2055,6 +2098,62 @@ mod tests {
         let mut expected = first_body;
         expected.extend_from_slice(&second_body);
         assert_eq!(decoded, expected);
+    }
+
+    /// Between frames the drained prefix is dead, and something has to say so.
+    ///
+    /// `compact_output` does not: it returns early there on purpose, because
+    /// while a finished frame is being drained the only bytes it could move
+    /// are the ones the caller is about to take. That leaves the full-drain
+    /// branch as its only escape, and a caller that stops a few bytes short
+    /// never takes it. Push the next frame on top and the buffer keeps both
+    /// -- once per frame, for as long as the stream runs.
+    ///
+    /// Invisible from the output, like every drop-too-little bug in this file:
+    /// the bytes are all correct and the buffer simply grows. The reason it
+    /// gets its own test rather than a case inside
+    /// `streaming_decode_drops_history_but_never_what_a_match_needs` is that
+    /// the two conditions it needs are exactly the two that test suppresses --
+    /// one frame, and `take_output`, which always drains to empty.
+    #[test]
+    fn concatenated_frames_do_not_accumulate_drained_output() {
+        const FRAMES: usize = 200;
+        const UNREAD: usize = 8;
+
+        let body = repetitive_body(4_096);
+        let frame = crate::encode_all(&body).unwrap();
+
+        let mut decoder = StreamingDecoder::new(DecoderOptions::default());
+        let mut decoded = Vec::new();
+        // One short of the whole frame, so the buffer never reaches empty and
+        // the full-drain branch never fires.
+        let mut sink = vec![0u8; body.len() - UNREAD];
+        let mut peak_retained = 0usize;
+        for _ in 0..FRAMES {
+            decoder.push(&frame).unwrap();
+            let taken = decoder.read(&mut sink);
+            decoded.extend_from_slice(&sink[..taken]);
+            peak_retained = peak_retained.max(decoder.retained_output_len());
+        }
+        decoder.finish().unwrap();
+        decoded.extend_from_slice(&decoder.take_output());
+
+        let mut expected = Vec::new();
+        for _ in 0..FRAMES {
+            expected.extend_from_slice(&body);
+        }
+        assert_eq!(decoded, expected);
+
+        // What is live at any moment is one frame's output plus the tail of
+        // the frame before it. Doubled for slack, since the point is the
+        // difference between a constant and a total, not the constant.
+        let ceiling = 2 * (body.len() + UNREAD);
+        assert!(
+            peak_retained <= ceiling,
+            "held {peak_retained} bytes against a {ceiling}-byte ceiling, over {} decoded: \
+             the drained prefix is accumulating instead of being reclaimed",
+            expected.len()
+        );
     }
 
     /// A caller that never reads is the opposite shape: nothing is droppable,

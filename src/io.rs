@@ -295,8 +295,8 @@ impl<'a, R: Read> Reader<'a, R> {
     /// pulled from it but did not consume.
     ///
     /// [`into_inner`](Self::into_inner) alone cannot be used to find the end of
-    /// a frame inside a longer source. This reader pulls fixed-size chunks, so
-    /// by the time a frame ends it has usually taken more from the source than
+    /// a frame inside a longer source. This reader pulls whole chunks, so by
+    /// the time a frame ends it has usually taken more from the source than
     /// the frame needed, and those bytes are gone from the source's cursor.
     /// The returned buffer is exactly that overshoot.
     ///
@@ -310,11 +310,10 @@ impl<'a, R: Read> Reader<'a, R> {
     /// partial read, which is worth stating because it looks like it should
     /// not be: this reader pulls in chunks of up to 128 KiB and the decoder
     /// consumes a whole chunk into its output buffer before any of it is
-    /// handed out. A
-    /// caller that reads sixteen bytes and stops has usually already drained
-    /// its source and decoded all of it. Stopping a read early therefore
-    /// discards decompressed output and recovers nothing on the compressed
-    /// side; it is not a way to find a frame boundary.
+    /// handed out. A caller that reads sixteen bytes and stops has usually
+    /// already drained its source and decoded all of it. Stopping a read early
+    /// therefore discards decompressed output and recovers nothing on the
+    /// compressed side; it is not a way to find a frame boundary.
     ///
     /// Undelivered decompressed output is still discarded; this is about the
     /// compressed side.

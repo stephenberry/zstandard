@@ -9,10 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `io::Reader` and bulk streaming decoding are significantly lighter and faster:
-  - `io::Reader` allocates its refill chunk lazily on first read, starting at 32 KiB and expanding to 128 KiB only when a refill fills it. Sources of a few hundred bytes to tens of kilobytes never allocate or fault the 128 KiB buffer, cutting memory overhead by over 50% on small inputs.
-  - `io::Reader` overrides `read_to_end` to append directly from the decoder's pending output into destination vectors without bounce-buffering through intermediate chunk buffers. Bulk reads through `read_to_end` and `io::copy` decode 10 to 25% faster with 50 to 65% fewer allocations across all sizes.
-  - `StreamingDecoder` no longer compacts unconsumed output between frames, eliminating redundant memmoves of the remainder when draining finished frames in fixed pieces.
+- `io::Reader` decodes bulk reads 10 to 25% faster, with 50 to 65% fewer allocations and up to 58% less memory. Three costs went: the 128 KiB refill chunk was allocated and zeroed up front, which was most of what a short source paid, and is now taken lazily at 32 KiB and grown only when a refill fills it; `read_to_end` and `io::copy` went through the default `Read::read_to_end`, and now append straight from the decoder's buffer instead of bouncing through the chunk; and draining a finished frame in fixed pieces compacted the decoder's output buffer as it went, moving about one copy of the whole frame for bytes the caller was about to take.
 
 ### Fixed
 
