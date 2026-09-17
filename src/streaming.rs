@@ -1198,9 +1198,8 @@ impl<'a> StreamingDecoder<'a> {
             return 0;
         }
 
-        dst[..count].copy_from_slice(&self.output[self.output_pos..self.output_pos + count]);
-        self.output_pos += count;
-        self.compact_output();
+        dst[..count].copy_from_slice(&self.pending_output()[..count]);
+        self.consume_output(count);
         count
     }
 
@@ -1228,6 +1227,30 @@ impl<'a> StreamingDecoder<'a> {
     /// [`take_output`](Self::take_output) or [`read`](Self::read).
     pub fn pending_output_len(&self) -> usize {
         self.output.len().saturating_sub(self.output_pos)
+    }
+
+    /// Borrow the decoded bytes buffered so far without removing them.
+    ///
+    /// Pair with [`consume_output`](Self::consume_output) to append output to
+    /// something that takes a slice, with no intermediate copy through a
+    /// caller's buffer. This is what `io::Reader::read_to_end` uses.
+    pub(crate) fn pending_output(&self) -> &[u8] {
+        &self.output[self.output_pos..]
+    }
+
+    /// Discard the first `count` bytes of [`pending_output`](Self::pending_output).
+    ///
+    /// # Panics
+    ///
+    /// If `count` exceeds [`pending_output_len`](Self::pending_output_len).
+    pub(crate) fn consume_output(&mut self, count: usize) {
+        assert!(
+            count <= self.pending_output_len(),
+            "consumed {count} bytes of pending output but only {} are pending",
+            self.pending_output_len()
+        );
+        self.output_pos += count;
+        self.compact_output();
     }
 
     /// Compressed bytes that have been pushed but not yet consumed.
@@ -1686,6 +1709,17 @@ impl<'a> StreamingDecoder<'a> {
             self.output.clear();
             self.output_pos = 0;
             self.release_history(droppable);
+            return;
+        }
+        // Between frames nothing behind the read cursor is history, so the
+        // half-buffer rule below would only be moving bytes the caller is
+        // about to take anyway: a reader draining a finished frame in fixed
+        // pieces paid a memmove of the remainder each time it crossed the
+        // halfway mark, about one copy of the whole output per frame. Wait
+        // for the buffer to empty instead, which is the branch above. The
+        // next frame's `frame_start` accounts for whatever is still here,
+        // and once it opens the window rule applies again.
+        if self.current_frame.is_none() {
             return;
         }
         if droppable * 2 >= self.output.len() {
