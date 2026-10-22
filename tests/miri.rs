@@ -117,6 +117,46 @@ fn every_level_round_trips_across_many_blocks() {
     }
 }
 
+/// Incompressible bodies through the fast and double-fast finders.
+///
+/// Those finders lengthen their stride after every run of misses and prefetch
+/// ahead of the cursor when they do. `structured_body` matches too often for a
+/// stride change to land near the end of the input, which is the only place a
+/// prefetch address can fall outside it, so it never reached that arithmetic.
+/// Noise misses everywhere, and the spread of lengths moves the last stride
+/// change across the tail.
+#[test]
+fn fast_finders_round_trip_incompressible_bodies() {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let noise: Vec<u8> = (0..BODY)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect();
+    for level in [1i32, 2, 3, 4] {
+        let level = CompressionLevel::try_new(level).expect("1..=22 is in range");
+        for len in (BODY - 256..=BODY).step_by(37) {
+            // Its own allocation, not a slice of `noise`: an address past the
+            // end of a slice but inside the buffer behind it is still in
+            // bounds as far as Miri is concerned.
+            let body = noise[..len].to_vec();
+            let encoded = encode_all_with_options(&body, small_block_options(level))
+                .unwrap_or_else(|err| panic!("encode failed at level {}: {err}", level.as_i32()));
+            let decoded = decode_all(&encoded)
+                .unwrap_or_else(|err| panic!("decode failed at level {}: {err}", level.as_i32()));
+            assert_eq!(
+                decoded,
+                body,
+                "round trip differed at level {} length {len}",
+                level.as_i32()
+            );
+        }
+    }
+}
+
 #[test]
 fn every_parser_family_round_trips_with_a_raw_dictionary() {
     // The dictionary paths run the match finders against an external buffer

@@ -764,10 +764,13 @@ fn plan_sequences_fast_without_prefix_inner_tracing<E: TaggedEntry, const MLS: u
             if ip2 >= next_step {
                 step += 1;
                 next_step += step_incr;
+                // These run ahead of the cursor and can pass the end of `src`, so the
+                // address is formed with `wrapping_add`: `ptr::add` past the end of the
+                // allocation is undefined behavior even though a prefetch never reads.
                 #[allow(unsafe_code)]
                 unsafe {
-                    crate::entropy::mem::prefetch_l1(src.as_ptr().add(ip1 + 64));
-                    crate::entropy::mem::prefetch_l1(src.as_ptr().add(ip1 + 128));
+                    crate::entropy::mem::prefetch_l1(src.as_ptr().wrapping_add(ip1 + 64));
+                    crate::entropy::mem::prefetch_l1(src.as_ptr().wrapping_add(ip1 + 128));
                 }
             }
             if ip3 >= search_limit {
@@ -1105,10 +1108,13 @@ fn plan_sequences_fast_without_prefix_inner_no_trace<E: TaggedEntry, const MLS: 
             if ip2 >= next_step {
                 step += 1;
                 next_step += step_incr;
+                // These run ahead of the cursor and can pass the end of `src`, so the
+                // address is formed with `wrapping_add`: `ptr::add` past the end of the
+                // allocation is undefined behavior even though a prefetch never reads.
                 #[allow(unsafe_code)]
                 unsafe {
-                    crate::entropy::mem::prefetch_l1(src.as_ptr().add(ip1 + 64));
-                    crate::entropy::mem::prefetch_l1(src.as_ptr().add(ip1 + 128));
+                    crate::entropy::mem::prefetch_l1(src.as_ptr().wrapping_add(ip1 + 64));
+                    crate::entropy::mem::prefetch_l1(src.as_ptr().wrapping_add(ip1 + 128));
                 }
             }
             if ip3 >= search_limit {

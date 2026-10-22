@@ -59,16 +59,20 @@ pub(crate) fn write_u64(output: &mut [u8], offset: usize, value: u64) {
 /// Compiled away entirely under Miri, which cannot execute inline assembly or
 /// the x86 prefetch intrinsics. That costs the check nothing: a prefetch cannot
 /// change a result, and the loads it anticipates still happen where Miri sees
-/// them.
+/// them. The caller's arithmetic that forms `ptr` is not compiled away, and
+/// Miri still checks it.
 ///
 /// # Safety
 ///
 /// There is no memory-safety requirement on `ptr`. A prefetch of an unmapped
 /// address is architecturally a no-op on both targets this emits a real
 /// instruction for. The signature stays `unsafe` because the body is inline
-/// assembly and target intrinsics, and because every caller already holds an
-/// `unsafe` block for the pointer arithmetic that produced `ptr` — making it
-/// safe would remove no `unsafe` from any call site.
+/// assembly and target intrinsics.
+///
+/// The freedom is in the prefetch, not in how the address is formed. An
+/// address that can fall outside the allocation it is derived from must be
+/// formed with `wrapping_add`: `ptr::add` past the end of an allocation is
+/// undefined behavior on its own, before this function ever runs.
 #[allow(unsafe_code)]
 #[inline(always)]
 pub(crate) unsafe fn prefetch_l1(ptr: *const u8) {
