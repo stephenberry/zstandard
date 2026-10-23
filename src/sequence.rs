@@ -2608,8 +2608,10 @@ fn execute_sequences_without_dictionary(
         let predicted_match_pos =
             (out.len() + (sequence.literal_length as usize)).wrapping_sub(offset);
         // Prefetch is unconditional: prefetch instructions are hints and do not
-        // fault on out-of-range addresses on modern x86/ARM hardware.
-        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().add(predicted_match_pos)) };
+        // fault on out-of-range addresses on modern x86/ARM hardware. `offset`
+        // is not validated until below, so the address can leave `out`, and
+        // `wrapping_add` is what keeps forming it defined.
+        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().wrapping_add(predicted_match_pos)) };
 
         literal_cursor = append_sequence_literals(out, literals, literal_cursor, sequence)?;
 
@@ -2646,8 +2648,10 @@ fn execute_sequences_without_dictionary_profiled(
         let predicted_match_pos =
             (out.len() + (sequence.literal_length as usize)).wrapping_sub(offset);
         // Prefetch is unconditional: prefetch instructions are hints and do not
-        // fault on out-of-range addresses on modern x86/ARM hardware.
-        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().add(predicted_match_pos)) };
+        // fault on out-of-range addresses on modern x86/ARM hardware. `offset`
+        // is not validated until below, so the address can leave `out`, and
+        // `wrapping_add` is what keeps forming it defined.
+        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().wrapping_add(predicted_match_pos)) };
 
         let literal_start = std::time::Instant::now();
         literal_cursor = append_sequence_literals(out, literals, literal_cursor, sequence)?;
@@ -2685,8 +2689,10 @@ fn execute_sequences_with_dictionary(
         let predicted_match_pos =
             (out.len() + (sequence.literal_length as usize)).wrapping_sub(offset);
         // Prefetch is unconditional: prefetch instructions are hints and do not
-        // fault on out-of-range addresses on modern x86/ARM hardware.
-        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().add(predicted_match_pos)) };
+        // fault on out-of-range addresses on modern x86/ARM hardware. `offset`
+        // is not validated until below, so the address can leave `out`, and
+        // `wrapping_add` is what keeps forming it defined.
+        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().wrapping_add(predicted_match_pos)) };
 
         literal_cursor = append_sequence_literals(out, literals, literal_cursor, sequence)?;
 
@@ -2739,8 +2745,10 @@ fn execute_sequences_with_dictionary_profiled(
         let predicted_match_pos =
             (out.len() + (sequence.literal_length as usize)).wrapping_sub(offset);
         // Prefetch is unconditional: prefetch instructions are hints and do not
-        // fault on out-of-range addresses on modern x86/ARM hardware.
-        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().add(predicted_match_pos)) };
+        // fault on out-of-range addresses on modern x86/ARM hardware. `offset`
+        // is not validated until below, so the address can leave `out`, and
+        // `wrapping_add` is what keeps forming it defined.
+        unsafe { crate::entropy::mem::prefetch_l1(out.as_ptr().wrapping_add(predicted_match_pos)) };
 
         let literal_start = std::time::Instant::now();
         literal_cursor = append_sequence_literals(out, literals, literal_cursor, sequence)?;
@@ -2907,10 +2915,7 @@ const WILDCOPY_OVERLENGTH: usize = 32;
 /// addressing mode, saving one instruction vs two separate prefetch calls.
 ///
 /// Compiled away under Miri, which cannot execute inline assembly or the x86
-/// prefetch intrinsics. Note that the x86 arm also computes `ptr.add(64)`,
-/// which for a match near the end of the window is an out-of-bounds pointer;
-/// that is fine for a prefetch on hardware and is exactly the kind of thing
-/// Miri would object to, so there is nothing lost by not running it there.
+/// prefetch intrinsics.
 ///
 /// # Safety
 ///
