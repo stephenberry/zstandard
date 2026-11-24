@@ -28,7 +28,7 @@ struct Args {
     /// Table-size overrides, for sweeping one table at a time. Sweeping a
     /// single log while the level holds everything else fixed is what
     /// separates "the parser costs more per unit of work" from "the parser
-    /// does more work"; see `tmp/instr/` for the counting half of that.
+    /// does more work".
     overrides: ParameterOverrides,
 }
 
